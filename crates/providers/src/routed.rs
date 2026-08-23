@@ -98,13 +98,20 @@ impl RoutedProvider {
         let body = match http::post_json(&self.http, &url, headers.clone(), &payload).await {
             Ok(b) => b,
             Err(CoreError::Provider(msg))
-                if msg.to_ascii_lowercase().contains("reasoning_effort")
+                if wire_openai::is_reasoning_rejection(&msg)
                     && request.reasoning != lmhub_core::ReasoningLevel::Off =>
             {
+                // Model rejected the reasoning level. Prefer the level the
+                // provider names ("please use low, high, or max"); fall back
+                // to stripping reasoning entirely.
+                let mut retried = request.clone();
+                retried.reasoning = wire_openai::suggested_reasoning_level(&msg)
+                    .unwrap_or(lmhub_core::ReasoningLevel::Off);
                 let plain = wire_openai::build_chat_payload(
-                    request,
+                    &retried,
                     OpenAiWireOpts {
-                        include_reasoning_effort: false,
+                        include_reasoning_effort: retried.reasoning
+                            != lmhub_core::ReasoningLevel::Off,
                     },
                 );
                 http::post_json(&self.http, &url, headers, &plain).await?

@@ -115,15 +115,23 @@ impl Provider for NativeOpenAiProvider {
         match self.post_chat(&payload).await {
             Ok(resp) => Ok(merge_warnings(resp, warnings)),
             Err(CoreError::Provider(msg))
-                if is_reasoning_param_rejection(&msg)
+                if wire_openai::is_reasoning_rejection(&msg)
                     && request.reasoning != lmhub_core::ReasoningLevel::Off =>
             {
-                // Attempt 2: model rejected reasoning_effort — degrade gracefully.
-                warnings.push("provider rejected `reasoning_effort`; retried without it".into());
+                // Attempt 2: model rejected the reasoning level — retry with
+                // the level the provider suggests, or without reasoning.
+                let mut retried = request.clone();
+                retried.reasoning = wire_openai::suggested_reasoning_level(&msg)
+                    .unwrap_or(lmhub_core::ReasoningLevel::Off);
+                warnings.push(format!(
+                    "provider rejected reasoning; retried with `{}`",
+                    retried.reasoning.as_str()
+                ));
                 let plain = wire_openai::build_chat_payload(
-                    request,
+                    &retried,
                     OpenAiWireOpts {
-                        include_reasoning_effort: false,
+                        include_reasoning_effort: retried.reasoning
+                            != lmhub_core::ReasoningLevel::Off,
                     },
                 );
                 self.post_chat(&plain)
@@ -159,11 +167,6 @@ impl Provider for NativeOpenAiProvider {
         let headers = vec![("authorization".to_string(), format!("Bearer {key}"))];
         crate::stream_runner::openai_sse(&self.http, url, headers, request).await
     }
-}
-
-fn is_reasoning_param_rejection(msg: &str) -> bool {
-    let m = msg.to_ascii_lowercase();
-    m.contains("reasoning_effort") || (m.contains("reasoning") && m.contains("unsupported"))
 }
 
 fn is_tools_rejection(msg: &str) -> bool {

@@ -153,8 +153,9 @@ actually supports (`off / minimal / low / medium / high / xhigh / max`), and
 the agent clamps the requested level before sending anything, logging a
 warning when it had to adjust. Models with no declaration get all levels;
 custom TOML models can pin theirs with `reasoning_levels = ["off", "high"]`.
-Providers that reject a level at request time degrade once (without
-reasoning) exactly as before.
+Providers that reject a level at request time degrade once: when the error
+names a valid level ("please use low, high, or max") the request is retried
+with that level, otherwise once without reasoning — never a hard failure.
 
 Transient failures (429/5xx/connect/timeouts) retry automatically:
 **6 attempts**, exponential backoff 0.5 s → 30 s cap with jitter, honoring

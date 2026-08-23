@@ -170,7 +170,7 @@ fn draw_run_detail(f: &mut Frame, state: &State, run_id: u64) {
     let Some(run) = state.runs.find(run_id) else {
         return;
     };
-    let area = centered_rect(f.area(), 70, 16);
+    let area = centered_rect(f.area(), 70, 18);
     let inner = modal_frame(
         f,
         area,
@@ -183,6 +183,17 @@ fn draw_run_detail(f: &mut Frame, state: &State, run_id: u64) {
         Line::from(format!("task     : {}", truncate(&run.task, 120))),
         Line::from(""),
     ];
+    if let Some(done) = &run.finished_line {
+        lines.push(Line::from(Span::styled(
+            done.clone(),
+            Style::default().fg(if done.contains("failure") {
+                Color::Red
+            } else {
+                Color::Green
+            }),
+        )));
+        lines.push(Line::from(""));
+    }
     if let Some(dir) = &run.run_dir {
         lines.push(Line::from(format!("run dir  : {}", dir.display())));
     }

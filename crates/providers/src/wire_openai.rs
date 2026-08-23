@@ -290,6 +290,36 @@ mod tests {
         // ratio per spec example: 1800/4218
         assert!((1800f64 / 4218.0 - 0.4267).abs() < 0.001);
     }
+
+    #[test]
+    fn detects_reasoning_rejections() {
+        assert!(is_reasoning_rejection("reasoning_effort is not supported"));
+        assert!(is_reasoning_rejection(
+            "This model always engages in thinking and cannot be disabled; please use low, high, or max"
+        ));
+        assert!(is_reasoning_rejection(
+            "reasoning is not supported by this model"
+        ));
+        assert!(!is_reasoning_rejection("stream_options is not supported"));
+        assert!(!is_reasoning_rejection("invalid api key"));
+    }
+
+    #[test]
+    fn parses_suggested_level() {
+        assert_eq!(
+            suggested_reasoning_level("please use low, high, or max"),
+            Some(ReasoningLevel::Low)
+        );
+        assert_eq!(
+            suggested_reasoning_level("set reasoning_effort to xhigh"),
+            Some(ReasoningLevel::XHigh)
+        );
+        assert_eq!(
+            suggested_reasoning_level("reasoning_effort unsupported"),
+            None
+        );
+        assert_eq!(suggested_reasoning_level(""), None);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -536,4 +566,54 @@ mod stream_tests {
         let err = OpenAiStreamAccumulator::new().finish(1).unwrap_err();
         assert!(matches!(err, CoreError::Parse(_)));
     }
+}
+
+/// Broad reasoning-rejection detection: a 4xx explaining that the request's
+/// reasoning effort / thinking mode is not acceptable for this model
+/// (e.g. "reasoning_effort" rejected, or "always engages in thinking and
+/// cannot be disabled; please use low, high, or max"). These must trigger a
+/// retry, not a hard failure.
+pub fn is_reasoning_rejection(msg: &str) -> bool {
+    let m = msg.to_ascii_lowercase();
+    if m.contains("reasoning_effort") {
+        return true;
+    }
+    let reasoning_clause = m.contains("reasoning")
+        && (m.contains("unsupported")
+            || m.contains("not supported")
+            || m.contains("invalid")
+            || m.contains("disabled")
+            || m.contains("available")
+            || m.contains("cannot"));
+    let thinking_clause = m.contains("thinking")
+        && (m.contains("unsupported")
+            || m.contains("not supported")
+            || m.contains("disabled")
+            || m.contains("cannot")
+            || m.contains("always"));
+    let effort_clause = m.contains("effort")
+        && (m.contains("unsupported") || m.contains("invalid") || m.contains("please use"));
+    reasoning_clause || thinking_clause || effort_clause
+}
+
+/// First concrete reasoning level a rejection message suggests, e.g.
+/// "please use low, high, or max" → Low. `None` when the message names no
+/// level. The earliest level named in the message wins.
+pub fn suggested_reasoning_level(msg: &str) -> Option<ReasoningLevel> {
+    let m = msg.to_ascii_lowercase();
+    const LADDER: [(&str, ReasoningLevel); 8] = [
+        ("xhigh", ReasoningLevel::XHigh),
+        ("minimal", ReasoningLevel::Minimal),
+        ("medium", ReasoningLevel::Medium),
+        ("high", ReasoningLevel::High),
+        ("max", ReasoningLevel::Max),
+        ("low", ReasoningLevel::Low),
+        ("none", ReasoningLevel::Off),
+        ("off", ReasoningLevel::Off),
+    ];
+    LADDER
+        .iter()
+        .filter_map(|(needle, lvl)| m.find(needle).map(|pos| (pos, *lvl)))
+        .min_by_key(|(pos, _)| *pos)
+        .map(|(_, lvl)| lvl)
 }

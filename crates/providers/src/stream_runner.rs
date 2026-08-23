@@ -126,24 +126,36 @@ pub(crate) async fn openai_sse(
         let text = resp.text().await.unwrap_or_default();
         let lower = text.to_ascii_lowercase();
         let strip_usage = lower.contains("stream_options");
-        let strip_reasoning =
-            lower.contains("reasoning_effort") && request.reasoning != ReasoningLevel::Off;
+        let reasoning_rejected =
+            wire_openai::is_reasoning_rejection(&text) && request.reasoning != ReasoningLevel::Off;
+        // A rejection naming a concrete level ("please use low, high, or
+        // max") means the model cannot disable thinking: retry with the
+        // suggested level instead of stripping reasoning entirely.
+        let suggested = wire_openai::suggested_reasoning_level(&text);
+        let retry_suggested =
+            reasoning_rejected && suggested.is_some() && suggested != Some(request.reasoning);
         let use_max_tokens = lower.contains("max_completion_tokens");
-        if strip_usage {
+        if retry_suggested {
+            let mut retried = request.clone();
+            retried.reasoning = suggested.unwrap();
+            payload = wire_openai::build_stream_payload(
+                &retried,
+                OpenAiWireOpts {
+                    include_reasoning_effort: true,
+                },
+            );
+        } else if strip_usage {
             wire_openai::strip_stream_options(&mut payload);
-        }
-        if strip_reasoning {
+        } else if reasoning_rejected {
             payload = wire_openai::build_stream_payload(
                 &without_reasoning(request),
                 OpenAiWireOpts {
                     include_reasoning_effort: false,
                 },
             );
-        }
-        if use_max_tokens {
+        } else if use_max_tokens {
             wire_openai::use_max_tokens_field(&mut payload);
-        }
-        if !(strip_usage || strip_reasoning || use_max_tokens) {
+        } else {
             return Err(CoreError::Provider(format!(
                 "HTTP {}: {}",
                 status.as_u16(),
@@ -228,19 +240,25 @@ pub(crate) async fn anthropic_sse(
         }
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        let lower = text.to_ascii_lowercase();
-        let strip_thinking = lower.contains("thinking") && request.reasoning != ReasoningLevel::Off;
-        if !strip_thinking {
+        let thinking_rejected =
+            wire_openai::is_reasoning_rejection(&text) && request.reasoning != ReasoningLevel::Off;
+        if !thinking_rejected {
             return Err(CoreError::Provider(format!(
                 "HTTP {}: {}",
                 status.as_u16(),
                 truncate_body(&text)
             )));
         }
+        // Retry with the level the provider suggests when it names one
+        // ("cannot be disabled; please use low, high, or max"); otherwise
+        // strip the thinking config entirely.
+        let mut retried = request.clone();
+        retried.reasoning =
+            wire_openai::suggested_reasoning_level(&text).unwrap_or(ReasoningLevel::Off);
         payload = wire_anthropic::build_chat_payload(
-            request,
+            &retried,
             wire_anthropic::AnthropicWireOpts {
-                supports_thinking: false,
+                supports_thinking: retried.reasoning != ReasoningLevel::Off,
             },
         );
         if url.contains(":rawStreamPredict") {
@@ -353,5 +371,105 @@ impl GracefulFinish for AnthropicStreamAccumulator {
 impl GracefulFinish for gemini::GeminiStreamAccumulator {
     fn finish_graceful(&mut self, duration_ms: u64) -> Result<ChatResponse> {
         std::mem::take(self).finish(duration_ms)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wire_test_util::sample_request;
+    use lmhub_core::{ChatDelta, ChatStreamItem};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    /// Read one HTTP request (headers + Content-Length body) from a socket.
+    async fn read_http_request(sock: &mut TcpStream) -> String {
+        let mut buf = Vec::new();
+        let mut byte = [0u8; 1];
+        loop {
+            sock.read_exact(&mut byte).await.unwrap();
+            buf.push(byte[0]);
+            if buf.ends_with(b"\r\n\r\n") {
+                break;
+            }
+        }
+        let head = String::from_utf8_lossy(&buf).to_string();
+        let len = head
+            .lines()
+            .find_map(|l| {
+                l.to_ascii_lowercase()
+                    .strip_prefix("content-length:")
+                    .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+            })
+            .unwrap_or(0);
+        let mut body = vec![0u8; len];
+        sock.read_exact(&mut body).await.unwrap();
+        format!("{head}{}", String::from_utf8_lossy(&body))
+    }
+
+    const REJECT_BODY: &str = r#"{"error":{"type":"server_error","message":"Error from provider (Console): Upstream request failed: [1210] This model always engages in thinking and cannot be disabled; please use low, high, or max"}}"#;
+
+    /// First request → 400 with the reasoning-rejection body; second request
+    /// → 200 SSE stream. Both request bodies are sent back via the channel.
+    async fn mock_reject_then_stream() -> (String, tokio::sync::oneshot::Receiver<(String, String)>)
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut s1, _) = listener.accept().await.unwrap();
+            let req1 = read_http_request(&mut s1).await;
+            let resp1 = format!(
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                REJECT_BODY.len(),
+                REJECT_BODY
+            );
+            s1.write_all(resp1.as_bytes()).await.unwrap();
+
+            let (mut s2, _) = listener.accept().await.unwrap();
+            let req2 = read_http_request(&mut s2).await;
+            let sse = concat!(
+                "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"Hel\"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"lo\"},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n",
+            );
+            let resp2 = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                sse.len(),
+                sse
+            );
+            s2.write_all(resp2.as_bytes()).await.unwrap();
+            let _ = tx.send((req1, req2));
+        });
+        (format!("http://{addr}/v1/chat/completions"), rx)
+    }
+
+    #[tokio::test]
+    async fn reasoning_rejection_retries_with_suggested_level() {
+        let (url, rx) = mock_reject_then_stream().await;
+        let client = reqwest::Client::new();
+        let req = sample_request(ReasoningLevel::Medium);
+        let stream = openai_sse(&client, url, Vec::new(), &req)
+            .await
+            .expect("ladder retry succeeds");
+        let deltas: Vec<Result<ChatStreamItem>> = futures::StreamExt::collect(stream).await;
+        let text: String = deltas
+            .iter()
+            .filter_map(|d| match d {
+                Ok(ChatStreamItem::Delta(ChatDelta::Text(t))) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "Hello");
+
+        let (req1, req2) = rx.await.expect("mock served both requests");
+        assert!(
+            req1.contains("\"reasoning_effort\":\"medium\""),
+            "first attempt keeps the requested level: {req1}"
+        );
+        assert!(
+            req2.contains("\"reasoning_effort\":\"low\""),
+            "retry uses the suggested level: {req2}"
+        );
     }
 }

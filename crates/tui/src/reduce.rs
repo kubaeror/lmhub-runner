@@ -440,6 +440,7 @@ impl State {
                 Vec::new()
             }
             crate::UiMsg::RunFinished { run_id, result } => {
+                let mut failure_notice = None;
                 if let Some(run) = self.runs.find_mut(run_id) {
                     run.status = RunSessionStatus::Finished;
                     run.finished_line = Some(match &result {
@@ -457,8 +458,16 @@ impl State {
                                 outcome.run_dir.display()
                             )
                         }
-                        Err(e) => format!("■ runner failure: {e}"),
+                        Err(e) => {
+                            // Surface the failure immediately, even when the
+                            // user is on another screen.
+                            failure_notice = Some(format!("✖ run failed: {e}"));
+                            format!("■ runner failure: {e}")
+                        }
                     });
+                }
+                if let Some(notice) = failure_notice {
+                    self.push_notice(notice);
                 }
                 // A slot freed up: promote queued runs.
                 self.promote_pending()

@@ -139,20 +139,46 @@ pub async fn execute(
     let (status, final_text): (RunStatus, Option<String>) = match exit {
         Ok(Ok(LoopExit::Completed(text))) => (RunStatus::Completed, Some(text)),
         Ok(Ok(LoopExit::TurnLimitReached)) => {
-            sink.error("limit_exceeded", "max turns reached without a final answer");
+            sink.error(
+                "limit_exceeded",
+                &format!(
+                    "max turns reached without a final answer (model={}, reasoning={})",
+                    spec.model.id, reasoning_str
+                ),
+            );
             (RunStatus::LimitExceeded, None)
         }
         Ok(Err(CoreError::Cancelled)) => (RunStatus::Cancelled, None),
         Ok(Err(CoreError::Timeout)) => {
-            sink.error("timeout", "run exceeded its wall-clock deadline");
+            sink.error(
+                "timeout",
+                &format!(
+                    "run exceeded its wall-clock deadline ({}s, model={}, reasoning={})",
+                    spec.deadline.as_secs(),
+                    spec.model.id,
+                    reasoning_str
+                ),
+            );
             (RunStatus::Timeout, None)
         }
         Ok(Err(e)) => {
-            sink.core_error(&e, "agent run failed");
+            sink.core_error(
+                &e,
+                &format!(
+                    "agent run failed (model={}, reasoning={})",
+                    spec.model.id, reasoning_str
+                ),
+            );
             (RunStatus::Error, None)
         }
         Err(panic_msg) => {
-            sink.error("panic", &format!("agent loop panicked: {panic_msg}"));
+            sink.error(
+                "panic",
+                &format!(
+                    "agent loop panicked (model={}, reasoning={}): {panic_msg}",
+                    spec.model.id, reasoning_str
+                ),
+            );
             (RunStatus::Error, None)
         }
     };
