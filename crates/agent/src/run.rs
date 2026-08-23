@@ -84,7 +84,7 @@ pub async fn execute(
         .join(lmhub_core::family::sanitize_component(&spec.model.id))
         .join(lmhub_core::family::sanitize_component(&reasoning_str))
         .join(format!("{started_dir}-{}", &run_id[..8]));
-    let workspace_dir = run_dir.join("output-modelu");
+    let workspace_dir = run_dir.join("model-output");
 
     std::fs::create_dir_all(&workspace_dir)?;
     let sink = EventSink::create(&run_dir, ui_tx)?;

@@ -1,5 +1,5 @@
 //! Filesystem jail confining every file tool to the model workspace
-//! (`output-modelu/`). Rejects `..` traversal and any path that resolves
+//! (`model-output/`). Rejects `..` traversal and any path that resolves
 //! (directly or through symlinks) outside the jail root.
 
 use lmhub_core::{CoreError, Result};

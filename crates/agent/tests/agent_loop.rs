@@ -140,7 +140,7 @@ async fn happy_path_writes_full_output_structure() {
     .await
     .unwrap();
 
-    // layout: output/MockFam/mock-1/high/{start}-{runid8}/output-modelu/
+    // layout: output/MockFam/mock-1/high/{start}-{runid8}/model-output/
     let route = tmp.path().join("MockFam").join("mock-1").join("high");
     assert!(outcome.run_dir.starts_with(&route));
     let run_component = outcome

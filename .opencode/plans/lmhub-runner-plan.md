@@ -2,7 +2,7 @@
 
 ## Cel
 Niezależny runner AI w Rust: modele jako coding agents, publiczny prompt + kontrolowane tools,
-sandbox na pliki wygenerowane przez model w `output/{family}/{model}/{reasoning}/output-modelu/`.
+sandbox na pliki wygenerowane przez model w `output/{family}/{model}/{reasoning}/model-output/`.
 
 ## Architektura (Cargo workspace)
 
