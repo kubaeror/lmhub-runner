@@ -108,6 +108,9 @@ impl AuthStore {
         if let Some(secret) = cred.access_token.as_deref() {
             crate::redact::register_extra(secret);
         }
+        if let Some(secret) = cred.refresh_token.as_deref() {
+            crate::redact::register_extra(secret);
+        }
         self.entries.insert(id, cred);
     }
 

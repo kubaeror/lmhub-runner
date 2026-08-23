@@ -128,6 +128,19 @@ pub async fn run_allowlisted(
     {
         // New process group => we can kill the entire subtree on timeout.
         cmd.process_group(0);
+        // Hard resource limits so a hostile command cannot OOM the host,
+        // fill the disk, or fork-bomb before the wall-clock timeout fires.
+        let cpu_secs = timeout.as_secs().saturating_add(5).max(60);
+        unsafe {
+            cmd.pre_exec(move || {
+                set_rlimit(libc::RLIMIT_AS as u64, 2 * 1024 * 1024 * 1024);
+                set_rlimit(libc::RLIMIT_CPU as u64, cpu_secs);
+                set_rlimit(libc::RLIMIT_FSIZE as u64, 64 * 1024 * 1024);
+                set_rlimit(libc::RLIMIT_NPROC as u64, 128);
+                set_rlimit(libc::RLIMIT_NOFILE as u64, 256);
+                Ok(())
+            });
+        }
     }
 
     let started = Instant::now();
@@ -135,7 +148,10 @@ pub async fn run_allowlisted(
         .spawn()
         .map_err(|e| CoreError::Sandbox(format!("failed to spawn {:?}: {e}", program)))?;
 
-    let pid = child.id();
+    let pid = child.id().unwrap_or(0);
+    // While armed, dropping this guard SIGKILLs the whole process group
+    // (covers loop cancellation and any other early return).
+    let mut group_guard = ProcessGroupGuard::new(pid);
 
     enum WaitResult {
         TimedOut,
@@ -163,13 +179,29 @@ pub async fn run_allowlisted(
 
     let timed_out = matches!(wait_result, WaitResult::TimedOut);
     if timed_out {
-        kill_process_group(pid).await;
-        // Reap after killing so no zombie remains.
-        let _ = child.wait().await;
+        #[cfg(unix)]
+        {
+            terminate_group(pid);
+            let exited =
+                tokio::time::timeout(Duration::from_secs(2), child.wait()).await.is_ok();
+            if !exited {
+                tracing::warn!(?pid, "run_command ignored SIGTERM; sending SIGKILL");
+                kill_group(pid);
+                // Reap after killing so no zombie remains.
+                let _ = child.wait().await;
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = child.kill().await;
+        }
     }
     if let WaitResult::Failed(msg) = &wait_result {
+        // Child may still be running; the guard's Drop kills the group.
         return Err(CoreError::Sandbox(msg.clone()));
     }
+    // Child is reaped: disarming prevents signaling a recycled pid/group.
+    group_guard.disarm();
     let exit_code = match &wait_result {
         WaitResult::Finished(status) => status.code(),
         _ => None,
@@ -189,18 +221,71 @@ pub async fn run_allowlisted(
     })
 }
 
-async fn kill_process_group(pid: Option<u32>) {
-    tracing::warn!(?pid, "run_command timed out; killing process group");
-    #[cfg(unix)]
-    if let Some(pid) = pid {
-        // Negative pid targets the whole group created via process_group(0).
-        unsafe {
-            libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+/// While armed, `Drop` SIGKILLs the child's whole process group. This covers
+/// loop cancellation and any early-return path without relying on tokio's
+/// `kill_on_drop`, which only kills the direct child.
+struct ProcessGroupGuard(Option<u32>);
+
+impl ProcessGroupGuard {
+    fn new(pid: u32) -> Self {
+        Self(Some(pid))
+    }
+
+    /// Call only after the child has been reaped, so a recycled pid/group
+    /// cannot be signaled by the guard's `Drop`.
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0.take() {
+            kill_group(pid);
         }
     }
-    #[cfg(not(unix))]
-    {
-        let _ = pid; // single-child kill only; unix is the supported target
+}
+
+/// SIGKILL the whole process group (negative pid targets the group created
+/// via `process_group(0)`). Probes with `kill(pid, 0)` first so a group that
+/// no longer exists is never signaled.
+#[cfg(unix)]
+fn kill_group(pid: u32) {
+    let group = -(pid as libc::pid_t);
+    if unsafe { libc::kill(group, 0) } == -1 {
+        return;
+    }
+    unsafe {
+        libc::kill(group, libc::SIGKILL);
+    }
+}
+
+/// SIGTERM the whole process group (grace period before SIGKILL).
+#[cfg(unix)]
+fn terminate_group(pid: u32) {
+    let group = -(pid as libc::pid_t);
+    if unsafe { libc::kill(group, 0) } == -1 {
+        return;
+    }
+    tracing::warn!(?pid, "run_command timed out; terminating process group");
+    unsafe {
+        libc::kill(group, libc::SIGTERM);
+    }
+}
+
+#[cfg(unix)]
+fn set_rlimit(resource: u64, value: u64) {
+    let limit = libc::rlimit {
+        rlim_cur: value,
+        rlim_max: value,
+    };
+    unsafe {
+        // Linux-gnu libc models the resource argument as u32; other unixes
+        // (musl, macOS, BSD) use c_int.
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        libc::setrlimit(resource as u32, &limit);
+        #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+        libc::setrlimit(resource as libc::c_int, &limit);
     }
 }
 
@@ -208,16 +293,25 @@ fn file_len(path: &Path) -> u64 {
     std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
 }
 
-/// Read up to `max_bytes` from the tail of a capture file.
+/// Read up to `max_bytes` from the tail of a capture file without loading
+/// the whole file into memory (capture size is attacker-controlled).
 pub fn read_capture_tail(path: &Path, max_bytes: u64) -> String {
-    let Ok(meta) = std::fs::metadata(path) else {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return String::new();
+    };
+    let Ok(meta) = file.metadata() else {
         return String::new();
     };
     let len = meta.len();
     let skip = len.saturating_sub(max_bytes);
-    let bytes = std::fs::read(path)
-        .map(|b| b[skip.min(b.len() as u64) as usize..].to_vec())
-        .unwrap_or_default();
+    if skip > 0 && file.seek(SeekFrom::Start(skip)).is_err() {
+        return String::new();
+    }
+    let mut bytes = Vec::with_capacity(skip.min(max_bytes) as usize);
+    if file.take(max_bytes).read_to_end(&mut bytes).is_err() {
+        return String::new();
+    }
     let mut text = String::from_utf8_lossy(&bytes).to_string();
     if skip > 0 {
         text.insert_str(0, "[...truncated...]\n");

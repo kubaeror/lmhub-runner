@@ -70,30 +70,49 @@ impl PathJail {
                 Ok(canonical)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // Target does not exist yet (write/create case): canonicalize
-                // the deepest existing ancestor and verify containment, then
-                // append the remaining (not-yet-existing, hence symlink-free)
-                // components.
+                // Target does not exist yet (write/create case): walk up to
+                // the deepest existing ancestor, verify containment of its
+                // canonical path, then append the remaining (not-yet-existing)
+                // components. A dangling symlink in the existing prefix is
+                // rejected outright: `exists()` would have skipped it and a
+                // later write could follow it once repointed.
                 let mut base = candidate.clone();
                 let mut tail: Vec<OsString> = Vec::new();
-                while !base.exists() {
-                    match (base.parent(), base.file_name()) {
-                        (Some(p), Some(name)) => {
-                            tail.push(name.to_os_string());
-                            base = p.to_path_buf();
+                loop {
+                    match base.symlink_metadata() {
+                        Ok(_) => {
+                            let canonical = base.canonicalize().map_err(|_| {
+                                CoreError::Sandbox(format!(
+                                    "cannot resolve {:?} inside workspace: dangling symlink in path",
+                                    original
+                                ))
+                            })?;
+                            if !canonical.starts_with(&self.root) {
+                                return Err(self.violation(original));
+                            }
+                            let mut resolved = canonical;
+                            for part in tail.into_iter().rev() {
+                                resolved.push(part);
+                            }
+                            return Ok(resolved);
                         }
-                        _ => break,
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            match (base.parent(), base.file_name()) {
+                                (Some(p), Some(name)) => {
+                                    tail.push(name.to_os_string());
+                                    base = p.to_path_buf();
+                                }
+                                _ => {
+                                    return Err(CoreError::Sandbox(format!(
+                                        "cannot resolve {:?} inside workspace",
+                                        original
+                                    )))
+                                }
+                            }
+                        }
+                        Err(e) => return Err(CoreError::Io(e)),
                     }
                 }
-                let canonical_base = base.canonicalize()?;
-                if !canonical_base.starts_with(&self.root) {
-                    return Err(self.violation(original));
-                }
-                let mut resolved = canonical_base;
-                for part in tail.into_iter().rev() {
-                    resolved.push(part);
-                }
-                Ok(resolved)
             }
             Err(e) => Err(CoreError::Io(e)),
         }
@@ -168,5 +187,21 @@ mod tests {
         std::fs::create_dir_all(j.root().join("deep/nested")).unwrap();
         let p = j.resolve("deep/nested/new-file.txt").unwrap();
         assert_eq!(p, j.root().join("deep/nested/new-file.txt"));
+    }
+
+    #[test]
+    fn rejects_dangling_symlink_in_write_path() {
+        let j = jail();
+        std::os::unix::fs::symlink("nowhere-target", j.root().join("dangling")).unwrap();
+        assert!(j.resolve("dangling/new-file.txt").is_err());
+    }
+
+    #[test]
+    fn follows_valid_symlink_inside_jail() {
+        let j = jail();
+        std::fs::create_dir_all(j.root().join("real-dir")).unwrap();
+        std::os::unix::fs::symlink("real-dir", j.root().join("alias")).unwrap();
+        let p = j.resolve("alias/new-file.txt").unwrap();
+        assert_eq!(p, j.root().join("real-dir/new-file.txt"));
     }
 }

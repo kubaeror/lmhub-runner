@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
+use tokio::io::AsyncReadExt;
 
 pub const TOOL_NAMES: [&str; 7] = [
     "list_directory",
@@ -286,48 +287,100 @@ impl ToolRuntime {
         let cap = requested_cap
             .unwrap_or(self.config.read_file_max_bytes)
             .min(self.config.read_file_max_bytes.max(1));
-        let data = match tokio::fs::read(&path).await {
-            Ok(d) => d,
+        let offset_line = args
+            .get("offset_line")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let mut file = match tokio::fs::File::open(&path).await {
+            Ok(f) => f,
             Err(e) => {
                 return ToolOutcome::fail(format!("cannot read {raw:?}: {e}"), json!({}), false)
             }
         };
-        let truncated_by_size = data.len() as u64 > cap;
-        let slice = &data[..(cap as usize).min(data.len())];
-        let mut text = String::from_utf8_lossy(slice).to_string();
-        let offset_line = args
-            .get("offset_line")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
-        if offset_line > 0 {
-            let skipped = text.lines().count() <= offset_line;
-            text = text
-                .lines()
-                .skip(offset_line)
-                .collect::<Vec<_>>()
-                .join("\n");
-            if skipped {
-                return ToolOutcome::fail(
-                    format!("offset_line {offset_line} beyond end of file"),
-                    json!({"path": raw}),
-                    false,
-                );
+        // Stream the file in bounded chunks: skip `offset_line` lines first,
+        // then collect up to `cap` bytes. Memory use is bounded by the cap
+        // regardless of file size, and paging works against the whole file.
+        let mut out: Vec<u8> = Vec::new();
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut lines_remaining = offset_line;
+        let mut collecting = offset_line == 0;
+        let mut truncated = false;
+        let mut newlines_seen: u64 = 0;
+        let mut non_empty = false;
+        let mut ends_with_newline = false;
+        loop {
+            let n = match file.read(&mut buf).await {
+                Ok(n) => n,
+                Err(e) => {
+                    return ToolOutcome::fail(
+                        format!("cannot read {raw:?}: {e}"),
+                        json!({}),
+                        false,
+                    )
+                }
+            };
+            if n == 0 {
+                break;
+            }
+            let chunk = &buf[..n];
+            non_empty = true;
+            ends_with_newline = chunk[n - 1] == b'\n';
+            newlines_seen += chunk.iter().filter(|&&b| b == b'\n').count() as u64;
+            if !collecting {
+                let mut start = 0usize;
+                for (i, &b) in chunk.iter().enumerate() {
+                    if b == b'\n' {
+                        lines_remaining -= 1;
+                        if lines_remaining == 0 {
+                            start = i + 1;
+                            collecting = true;
+                            break;
+                        }
+                    }
+                }
+                if !collecting {
+                    continue;
+                }
+                let take = (cap as usize - out.len()).min(chunk.len() - start);
+                out.extend_from_slice(&chunk[start..start + take]);
+                if take < chunk.len() - start {
+                    truncated = true;
+                    break;
+                }
+            } else {
+                let take = (cap as usize - out.len()).min(chunk.len());
+                out.extend_from_slice(&chunk[..take]);
+                if take < chunk.len() {
+                    truncated = true;
+                    break;
+                }
             }
         }
+        // Matches `lines().count() <= offset_line`: a trailing newline does
+        // not count as an extra line.
+        let total_lines = newlines_seen + u64::from(non_empty && !ends_with_newline);
+        if offset_line > 0 && total_lines <= offset_line {
+            return ToolOutcome::fail(
+                format!("offset_line {offset_line} beyond end of file"),
+                json!({"path": raw}),
+                false,
+            );
+        }
+        let text = String::from_utf8_lossy(&out).to_string();
         let meta = json!({
             "path": raw,
-            "bytes_read": slice.len(),
-            "truncated": truncated_by_size,
+            "bytes_read": out.len(),
+            "truncated": truncated,
             "offset_line": offset_line,
         });
-        let out = if truncated_by_size {
+        let out_text = if truncated {
             format!(
                 "{text}\n[...file truncated at {cap} bytes — use offset_line/max_bytes to page...]"
             )
         } else {
             text
         };
-        ToolOutcome::ok(out, meta)
+        ToolOutcome::ok(out_text, meta)
     }
 
     async fn write_file(&self, args: &Value) -> ToolOutcome {
@@ -401,11 +454,39 @@ impl ToolRuntime {
             Ok(p) => p,
             Err(e) => return violation_outcome(e),
         };
-        let current = match tokio::fs::read_to_string(&path).await {
-            Ok(c) => c,
+        // Cap the read so a huge file cannot exhaust memory; edits are meant
+        // for small snippets anyway.
+        const EDIT_MAX_BYTES: u64 = 8 * 1024 * 1024;
+        let file = match tokio::fs::File::open(&path).await {
+            Ok(f) => f,
             Err(e) => {
                 return ToolOutcome::fail(
                     format!("cannot read {raw:?} for editing (utf-8 text only): {e}"),
+                    json!({"path": raw}),
+                    false,
+                )
+            }
+        };
+        let mut bytes = Vec::new();
+        if let Err(e) = file.take(EDIT_MAX_BYTES + 1).read_to_end(&mut bytes).await {
+            return ToolOutcome::fail(
+                format!("cannot read {raw:?} for editing: {e}"),
+                json!({"path": raw}),
+                false,
+            );
+        }
+        if bytes.len() as u64 > EDIT_MAX_BYTES {
+            return ToolOutcome::fail(
+                format!("file too large to edit (limit {EDIT_MAX_BYTES} bytes); use write_file with full content instead"),
+                json!({"path": raw}),
+                false,
+            );
+        }
+        let current = match String::from_utf8(bytes) {
+            Ok(c) => c,
+            Err(_) => {
+                return ToolOutcome::fail(
+                    format!("cannot read {raw:?} for editing (utf-8 text only)"),
                     json!({"path": raw}),
                     false,
                 )
@@ -597,5 +678,83 @@ fn violation_outcome(e: CoreError) -> ToolOutcome {
         error: Some(e.to_string()),
         sandbox_violation: true,
         duration_ms: 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn runtime() -> (tempfile::TempDir, ToolRuntime) {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = ToolRuntime::create(
+            &dir.path().join("ws"),
+            SandboxConfig {
+                allowed_commands: vec!["node".into()],
+                command_timeout: Duration::from_secs(30),
+                read_file_max_bytes: 1024,
+                write_file_max_bytes: 1_048_576,
+            },
+        )
+        .unwrap();
+        (dir, rt)
+    }
+
+    #[tokio::test]
+    async fn read_file_paging_skips_lines_before_truncation() {
+        let (_dir, rt) = runtime();
+        let content = (0..100)
+            .map(|i| format!("line {i:03}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(rt.root().join("big.txt"), &content).unwrap();
+
+        let out = rt
+            .execute(
+                "read_file",
+                &json!({"path": "big.txt", "offset_line": 90, "max_bytes": 50}),
+            )
+            .await;
+        assert!(out.success, "{}", out.summary);
+        assert!(out.summary.starts_with("line 090"), "{}", out.summary);
+        assert!(!out.summary.contains("line 000"), "{}", out.summary);
+        assert!(out.summary.contains("truncated"), "{}", out.summary);
+    }
+
+    #[tokio::test]
+    async fn read_file_offset_beyond_end_fails() {
+        let (_dir, rt) = runtime();
+        std::fs::write(rt.root().join("small.txt"), "a\nb\n").unwrap();
+        let out = rt
+            .execute("read_file", &json!({"path": "small.txt", "offset_line": 2}))
+            .await;
+        assert!(!out.success);
+        assert!(out.summary.contains("beyond end"), "{}", out.summary);
+    }
+
+    #[tokio::test]
+    async fn read_file_skips_exact_last_line() {
+        let (_dir, rt) = runtime();
+        std::fs::write(rt.root().join("two.txt"), "a\nb").unwrap();
+        let out = rt
+            .execute("read_file", &json!({"path": "two.txt", "offset_line": 1}))
+            .await;
+        assert!(out.success, "{}", out.summary);
+        assert_eq!(out.summary, "b");
+    }
+
+    #[tokio::test]
+    async fn edit_file_rejects_huge_files() {
+        let (_dir, rt) = runtime();
+        let big = "x".repeat((8 * 1024 * 1024) as usize + 100);
+        std::fs::write(rt.root().join("huge.txt"), &big).unwrap();
+        let out = rt
+            .execute(
+                "edit_file",
+                &json!({"path": "huge.txt", "old_string": "x", "new_string": "y"}),
+            )
+            .await;
+        assert!(!out.success);
+        assert!(out.summary.contains("too large"), "{}", out.summary);
     }
 }

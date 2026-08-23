@@ -1,13 +1,17 @@
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, MutexGuard};
 
 /// Values of runner environment variables whose names look like secrets.
 /// Collected once at startup; used only to scrub them out of anything we
 /// are about to persist. The values themselves never leave this module.
-static SECRETS: OnceLock<Vec<String>> = OnceLock::new();
-/// Extra values registered at runtime (e.g. keys from auth.json).
-static EXTRA: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// A plain `Mutex` (not `OnceLock`) so values registered at runtime
+/// (`register_extra`) are visible to `scrub` no matter when they arrive.
+static SECRETS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 const SENSITIVE_MARKERS: [&str; 6] = ["KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "AUTH"];
+
+fn lock() -> MutexGuard<'static, Vec<String>> {
+    SECRETS.lock().expect("redact secrets mutex poisoned")
+}
 
 pub fn init() {
     let mut values: Vec<String> = std::env::vars()
@@ -17,9 +21,10 @@ pub fn init() {
         })
         .map(|(_, v)| v)
         .collect();
-    values.extend(EXTRA.lock().unwrap().iter().cloned());
+    values.extend(lock().iter().cloned());
     values.sort_by_key(|v| std::cmp::Reverse(v.len()));
-    let _ = SECRETS.set(values);
+    values.dedup();
+    *lock() = values;
 }
 
 /// Register an additional secret value (auth.json entries, oauth tokens).
@@ -28,24 +33,18 @@ pub fn register_extra(value: &str) {
     if value.len() < 8 {
         return;
     }
-    if let Some(secrets) = SECRETS.get() {
-        // Rebuild the list with the new value first (longest-first ordering
-        // is re-established on the combined set).
-        let mut all: Vec<String> = secrets.clone();
-        all.push(value.to_string());
-        all.sort_by_key(|v| std::cmp::Reverse(v.len()));
-        let _ = SECRETS.set(all);
+    let mut secrets = lock();
+    if !secrets.iter().any(|s| s == value) {
+        secrets.push(value.to_string());
+        secrets.sort_by_key(|v| std::cmp::Reverse(v.len()));
     }
-    EXTRA.lock().unwrap().push(value.to_string());
 }
 
 /// Replace any known secret value with `[REDACTED]`.
 pub fn scrub(input: &str) -> String {
-    let Some(secrets) = SECRETS.get() else {
-        return input.to_string();
-    };
+    let secrets = lock();
     let mut out = input.to_string();
-    for secret in secrets {
+    for secret in secrets.iter() {
         if !secret.is_empty() && out.contains(secret.as_str()) {
             out = out.replace(secret.as_str(), "[REDACTED]");
         }
@@ -74,5 +73,22 @@ mod tests {
         let s = super::scrub("failed call with super-secret-value-123 inside");
         assert!(s.contains("[REDACTED]"));
         assert!(!s.contains("super-secret-value-123"));
+    }
+
+    #[test]
+    fn scrub_replaces_values_registered_after_init() {
+        super::init();
+        super::register_extra("runtime-secret-value-456");
+        let s = super::scrub("logged key runtime-secret-value-456 leaked");
+        assert!(s.contains("[REDACTED]"));
+        assert!(!s.contains("runtime-secret-value-456"));
+    }
+
+    #[test]
+    fn register_extra_before_init_is_kept() {
+        super::register_extra("early-secret-value-789");
+        super::init();
+        let s = super::scrub("early-secret-value-789 in an error");
+        assert!(s.contains("[REDACTED]"));
     }
 }
