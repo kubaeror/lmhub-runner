@@ -1,7 +1,9 @@
 # Custom providers — `providers/*.toml`
 
 Every valid `*.toml` here becomes a provider at startup; entries override
-built-ins and the bundled catalog by `id`. See `example.toml.example` for the
+built-ins and the bundled catalog by `id` (files are processed in sorted
+order). A broken file is reported at startup, never fatal. The directory is
+overridable via `LMHUB_PROVIDERS_DIR`. See `example.toml.example` for the
 full schema.
 
 The bundled catalog already covers **all 194 models.dev providers** (the same
@@ -14,7 +16,8 @@ set opencode uses) — TOML files are only needed to:
 ## Credential sources
 
 Precedence per provider: `~/.config/lmhub/auth.json` (TUI: select provider →
-`Enter`) → environment variables listed in the catalog entry.
+`Enter`; keys must be ≥ 8 chars) → environment variables listed in the
+catalog entry.
 
 Local runtimes (`ollama`, `lmstudio`, `llama.cpp`, …) need no key.
 
@@ -32,3 +35,4 @@ Local runtimes (`ollama`, `lmstudio`, `llama.cpp`, …) need no key.
 | sap-ai-core | `AICORE_SERVICE_KEY` JSON (client credentials) |
 
 Everything else speaks the OpenAI-compatible wire at its catalog URL.
+
