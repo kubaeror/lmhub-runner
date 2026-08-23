@@ -72,9 +72,11 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+      # CLI instead of rustsec/audit-check: the action requires `checks:
+      # write` to annotate findings (read-only token fails on fork PRs),
+      # while `cargo audit` exits non-zero on vulnerabilities alone.
+      - run: cargo install --locked cargo-audit
+      - run: cargo audit
 
   deny:
     name: cargo deny (licenses/bans/sources)
