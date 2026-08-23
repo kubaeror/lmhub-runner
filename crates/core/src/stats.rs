@@ -103,7 +103,7 @@ pub fn gen_run_id() -> String {
     uuid::Uuid::new_v4().simple().to_string()
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TokensBlock {
     pub input: u64,
@@ -115,7 +115,7 @@ pub struct TokensBlock {
     pub cache_hit_ratio: Option<f64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PerformanceBlock {
     pub tokens_per_second: Option<f64>,
@@ -125,7 +125,7 @@ pub struct PerformanceBlock {
     pub max_llm_request_ms: Option<u64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolCallsBlock {
     pub total: u64,
@@ -135,7 +135,7 @@ pub struct ToolCallsBlock {
     pub failure_ratio: Option<f64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CacheBlock {
     pub enabled: bool,
@@ -143,7 +143,7 @@ pub struct CacheBlock {
     pub provider_cache_used: Option<bool>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PricingBlock {
     pub source: Option<String>,
@@ -180,7 +180,7 @@ impl PricingBlock {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ErrorsBlock {
     pub count: u32,
@@ -188,7 +188,7 @@ pub struct ErrorsBlock {
 }
 
 /// The exact document persisted as `statistics.json`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StatisticsDocument {
     pub status: RunStatus,

@@ -1,18 +1,37 @@
 //! Interactive terminal UI for lmhub-runner.
 //!
-//! Three tabs:
-//! - **Setup** — provider → models (auto-fetched, source shown) → model,
-//!   reasoning level, system prompt (configurable files + default), task
-//!   input; starting a run switches to Run;
-//! - **Run** — live events feed plus tokens/cache/cost/tool-call counters;
-//! - **History** — browse previous runs' `statistics.json`.
+//! Elm-style core: [`State`] + [`Action`]s + pure-ish `reduce` returning
+//! [`Effect`]s, which the loop here executes (async fetches/launches come
+//! back as `UiMsg` actions).
+//!
+//! Screens:
+//! - **Setup** — searchable/grouped provider list, model picker with
+//!   multi-select (bulk start across providers), reasoning, prompts, task;
+//! - **Run** — multiple concurrent sessions, structured transcript, stats;
+//! - **History** — previous runs' `statistics.json` (pretty-printed detail).
+//!
+//! `:` opens the command palette. Mouse clicks focus panes / switch tabs.
 
-mod app;
-mod ui;
+mod action;
+mod history;
+mod keymap;
+mod pricing;
+mod provider_search;
+mod reduce;
+mod state;
+mod transcript;
+mod view;
 
-use app::{App, Focus};
+pub use action::Action;
+pub use keymap::dispatch;
+pub use state::State;
+
+use action::Effect;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyEvent, KeyEventKind,
+        MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -29,16 +48,23 @@ pub struct PromptFile {
     pub path: PathBuf,
 }
 
+/// Messages from background tasks (models fetch, agent runs, connect flows).
+#[derive(Clone)]
 pub enum UiMsg {
-    ModelsReady(
-        /// Provider id the request was made for (stale-response guard).
-        Box<String>,
-        Box<lmhub_core::ModelCatalog>,
-        Option<Arc<lmhub_modelsdev::CatalogSnapshot>>,
-    ),
-    RunEvent(lmhub_core::RunEvent),
+    ModelsReady {
+        requested_for: String,
+        catalog: Box<lmhub_core::ModelCatalog>,
+        snapshot: Option<Arc<lmhub_modelsdev::CatalogSnapshot>>,
+    },
+    RunEvent {
+        run_id: u64,
+        event: lmhub_core::RunEvent,
+    },
     /// Terminal state of one background run.
-    RunFinished(Result<Box<lmhub_agent::RunOutcome>, String>),
+    RunFinished {
+        run_id: u64,
+        result: Result<Box<lmhub_agent::RunOutcome>, String>,
+    },
     /// Transient status line (connect flows etc.).
     Notice(String),
 }
@@ -61,7 +87,8 @@ pub async fn run_tui(ctx: TuiContext) -> anyhow::Result<()> {
     use anyhow::Context as _;
     enable_raw_mode().context("TUI requires an interactive terminal (run inside a real tty)")?;
     let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen).context("entering alternate screen failed")?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
+        .context("entering alternate screen failed")?;
     let backend = CrosstermBackend::new(std::io::stdout());
     let mut terminal = Terminal::new(backend).context("terminal backend init failed")?;
 
@@ -78,299 +105,225 @@ pub async fn run_tui(ctx: TuiContext) -> anyhow::Result<()> {
         }
     });
 
-    let mut app = App::new(
+    let mut state = State::new(
         ctx.registry,
         ctx.modelsdev,
+        ctx.auth_store,
+        ctx.sandbox_runtime,
         ctx.config,
         ctx.config_path,
         ctx.prompts,
         ctx.output_base,
-        ctx.auth_store,
-        ctx.sandbox_runtime,
         ui_tx,
     );
     // Auto-load models for the initially selected provider.
-    app.request_models(false);
+    let initial_effects = state.request_models(false);
+    run_effects(&mut state, initial_effects);
 
     let mut tick = tokio::time::interval(TICK_INTERVAL);
 
     let result = loop {
-        terminal.draw(|f| ui::draw(f, &mut app))?;
+        terminal.draw(|f| view::draw(f, &mut state))?;
         tokio::select! {
             _ = tick.tick() => {}
             ev = key_rx.recv() => match ev {
-                Some(event) => handle_event(&mut app, event),
+                Some(event) => handle_input(&mut state, event),
                 None => break Ok(()),
             },
             msg = ui_rx.recv() => match msg {
-                Some(m) => app.handle_ui_msg(m),
+                Some(m) => {
+                    let effects = state.reduce(Action::UiMsg(m));
+                    run_effects(&mut state, effects);
+                }
                 None => break Ok(()),
             },
         }
-        if app.should_quit {
+        if state.quit {
             break Ok(());
         }
     };
 
-    // Force-quit with a run still winding down: give a cancelled run a short
+    // Force-quit with runs still winding down: give cancelled runs a short
     // grace period to write statistics.json before the tokio runtime is
-    // dropped (dropping it would kill the agent task mid-write).
-    let unfinished_run = app
-        .run
-        .as_ref()
-        .map(|r| r.finished_line.is_none())
-        .unwrap_or(false);
-    if unfinished_run {
+    // dropped (dropping it would kill the agent tasks mid-write).
+    let unfinished = state
+        .runs
+        .runs
+        .iter()
+        .filter(|r| r.status != state::RunSessionStatus::Finished)
+        .count();
+    if unfinished > 0 {
         let grace = tokio::time::timeout(Duration::from_secs(5), async {
-            while let Some(msg) = ui_rx.recv().await {
-                if matches!(&msg, UiMsg::RunFinished(_)) {
-                    app.handle_ui_msg(msg);
+            loop {
+                let still = state
+                    .runs
+                    .runs
+                    .iter()
+                    .filter(|r| r.status != state::RunSessionStatus::Finished)
+                    .count();
+                if still == 0 {
                     break;
                 }
-                app.handle_ui_msg(msg);
+                match ui_rx.recv().await {
+                    Some(msg) => {
+                        let mut effects = state.reduce(Action::UiMsg(msg));
+                        // Never start queued runs while quitting.
+                        effects.retain(|e| !matches!(e, Effect::LaunchRun { .. }));
+                        run_effects(&mut state, effects);
+                    }
+                    None => break,
+                }
             }
         })
         .await;
         if grace.is_err() {
-            tracing::warn!("force-quit: run did not finish within 5s; dropping task");
+            tracing::warn!("force-quit: runs did not finish within 5s; dropping tasks");
         }
     }
 
+    state.prefs.save(&state.prefs_path);
+    execute!(std::io::stdout(), DisableMouseCapture)?;
     disable_raw_mode()?;
     execute!(std::io::stdout(), LeaveAlternateScreen)?;
     result
 }
 
-fn handle_event(app: &mut App, event: Event) {
-    let Event::Key(key) = event else { return };
-    if key.kind != KeyEventKind::Press {
-        return;
-    }
-
-    // Modal key-entry overlay captures everything.
-    if matches!(app.mode, app::Mode::EnterKey { .. }) {
-        match key.code {
-            KeyCode::Esc => {
-                app.mode = app::Mode::Normal;
-                app.key_input.clear();
+fn handle_input(state: &mut State, event: Event) {
+    let action = match event {
+        Event::Key(key) => key_action(state, key),
+        Event::Mouse(m) => match m.kind {
+            MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                view::mouse_action(state, m.column, m.row)
             }
-            KeyCode::Enter => {
-                app.save_entered_key();
-            }
-            KeyCode::Backspace => {
-                app.key_input.pop();
-            }
-            KeyCode::Char(c) => app.key_input.push(c),
-            _ => {}
-        }
-        return;
-    }
-
-    if key.modifiers.contains(KeyModifiers::CONTROL)
-        && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('q'))
-    {
-        quit_request(app);
-        return;
-    }
-
-    match key.code {
-        KeyCode::Char('q') => quit_request(app),
-        KeyCode::Tab => {
-            app.tab = match app.tab {
-                app::Tab::Setup => app::Tab::History,
-                app::Tab::History => app::Tab::Run,
-                app::Tab::Run => app::Tab::Setup,
-            };
-            if app.tab == app::Tab::History && app.history.is_empty() {
-                app.scan_history();
-            }
-        }
-        _ => match app.tab {
-            app::Tab::Setup => setup_keys(app, key.code),
-            app::Tab::Run => run_keys(app, key.code),
-            app::Tab::History => history_keys(app, key.code),
+            _ => None,
         },
-    }
-
-    // Model refresh: F5 force-refreshes (bypasses the Models.dev TTL); 'r'
-    // reloads from cache. Neither fires while typing (provider filter or task
-    // text) so typing never wipes the model selection.
-    if app.tab == app::Tab::Setup
-        && (matches!(key.code, KeyCode::F(5))
-            || (matches!(key.code, KeyCode::Char('r'))
-                && !matches!(app.focus, Focus::Providers | Focus::Task)))
-    {
-        app.request_models(matches!(key.code, KeyCode::F(5)));
-    }
-}
-
-fn quit_request(app: &mut App) {
-    if let Some(run) = &app.run {
-        if run.finished_line.is_none() {
-            // Cancel first so statistics.json can still be written by the agent.
-            run.cancel.cancel();
-            app.push_log("cancel requested — press q again to force quit");
-            return;
-        }
-    }
-    app.should_quit = true;
-}
-
-fn cycle_focus(app: &mut App, forward: bool) {
-    const ORDER: [Focus; 5] = [
-        Focus::Providers,
-        Focus::Models,
-        Focus::Reasoning,
-        Focus::Prompts,
-        Focus::Task,
-    ];
-    let idx = ORDER.iter().position(|f| *f == app.focus).unwrap_or(0);
-    let next = if forward {
-        (idx + 1) % ORDER.len()
-    } else {
-        (idx + ORDER.len() - 1) % ORDER.len()
+        _ => None,
     };
-    app.focus = ORDER[next];
-}
-
-fn setup_keys(app: &mut App, code: KeyCode) {
-    match app.focus {
-        Focus::Providers => match code {
-            KeyCode::Left | KeyCode::Right => cycle_focus(app, code == KeyCode::Right),
-            KeyCode::Up => {
-                let count = app.filtered_indices().len();
-                if count > 0 {
-                    app.provider_idx = app
-                        .provider_idx
-                        .saturating_sub(1)
-                        .min(count.saturating_sub(1));
-                    app.request_models(false);
-                }
-            }
-            KeyCode::Down => {
-                let count = app.filtered_indices().len();
-                if app.provider_idx + 1 < count {
-                    app.provider_idx += 1;
-                    app.request_models(false);
-                } else if count > 0 && app.provider_idx >= count {
-                    app.provider_idx = count - 1;
-                    app.request_models(false);
-                }
-            }
-            KeyCode::Enter => app.start_connect(),
-            KeyCode::Esc => app.provider_filter.clear(),
-            KeyCode::Char(c) => app.provider_filter.push(c),
-            _ => {}
-        },
-        Focus::Models => match code {
-            KeyCode::Left | KeyCode::Right => cycle_focus(app, code == KeyCode::Right),
-            KeyCode::Up => app.model_idx = app.model_idx.saturating_sub(1),
-            KeyCode::Down if app.model_idx + 1 < app.models.len() => {
-                app.model_idx += 1;
-                app.reasoning_idx = 0;
-            }
-            _ => {}
-        },
-        Focus::Reasoning => {
-            let levels = app.visible_reasoning_levels().len();
-            match code {
-                KeyCode::Left | KeyCode::Right => cycle_focus(app, code == KeyCode::Right),
-                KeyCode::Up => {
-                    app.reasoning_idx = app
-                        .reasoning_idx
-                        .saturating_sub(1)
-                        .min(levels.saturating_sub(1))
-                }
-                KeyCode::Down if app.reasoning_idx + 1 < levels => {
-                    app.reasoning_idx += 1;
-                }
-                _ => {}
-            }
-        }
-        Focus::Prompts => match code {
-            KeyCode::Left | KeyCode::Right => cycle_focus(app, code == KeyCode::Right),
-            KeyCode::Up => app.prompt_idx = app.prompt_idx.saturating_sub(1),
-            KeyCode::Down => {
-                if app.prompt_idx + 1 < app.prompts.len() {
-                    app.prompt_idx += 1;
-                }
-            }
-            KeyCode::Char('d') | KeyCode::Enter => set_default_prompt(app),
-            _ => {}
-        },
-        Focus::Task => match code {
-            KeyCode::Left | KeyCode::Right => cycle_focus(app, code == KeyCode::Right),
-            KeyCode::Enter => {
-                if let Err(e) = app.start_run() {
-                    app.push_notice(format!("✖ {e}"));
-                }
-            }
-            KeyCode::Backspace => {
-                app.task_input.pop();
-            }
-            KeyCode::Char(c) => app.task_input.push(c),
-            _ => {}
-        },
+    if let Some(action) = action {
+        let effects = state.reduce(action);
+        run_effects(state, effects);
     }
 }
 
-fn set_default_prompt(app: &mut App) {
-    if let Some(p) = app.prompts.get(app.prompt_idx) {
-        app.config.default_prompt = Some(p.name.clone());
-        match app.config.save(&app.config_path) {
-            Ok(()) => app.push_log(format!("default prompt → {}", p.name)),
-            Err(e) => app.push_log(format!("✖ could not save config: {e}")),
-        }
+fn key_action(state: &mut State, key: KeyEvent) -> Option<Action> {
+    if key.kind != KeyEventKind::Press {
+        return None;
     }
+    let is_quit = matches!(key.code, crossterm::event::KeyCode::Char('q'))
+        || (key
+            .modifiers
+            .contains(crossterm::event::KeyModifiers::CONTROL)
+            && matches!(
+                key.code,
+                crossterm::event::KeyCode::Char('c') | crossterm::event::KeyCode::Char('q')
+            ));
+    if is_quit {
+        let still_running = state
+            .runs
+            .runs
+            .iter()
+            .any(|r| r.status == state::RunSessionStatus::Running);
+        if still_running && state.cancel_requested {
+            return Some(Action::ForceQuit);
+        }
+        return Some(Action::Quit);
+    }
+    crate::dispatch(state, key)
 }
 
-fn run_keys(app: &mut App, code: KeyCode) {
-    match code {
-        KeyCode::Char('c') => {
-            if let Some(run) = &app.run {
-                run.cancel.cancel();
-            }
-        }
-        KeyCode::Up => {
-            if let Some(run) = app.run.as_mut() {
-                run.scroll = run.scroll.saturating_add(1);
-            }
-        }
-        KeyCode::Down => {
-            if let Some(run) = app.run.as_mut() {
-                run.scroll = run.scroll.saturating_sub(1);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn history_keys(app: &mut App, code: KeyCode) {
-    if app.history_detail.is_some() {
-        if matches!(code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q')) {
-            app.history_detail = None;
-        }
-        return;
-    }
-    match code {
-        KeyCode::Up => app.history_idx = app.history_idx.saturating_sub(1),
-        KeyCode::Down => {
-            if app.history_idx + 1 < app.history.len() {
-                app.history_idx += 1;
-            }
-        }
-        KeyCode::F(5) => app.scan_history(),
-        KeyCode::Enter => {
-            if let Some(row) = app.history.get(app.history_idx) {
-                let path = row.path.clone();
-                match std::fs::read_to_string(&path) {
-                    Ok(raw) => app.history_detail = Some(raw),
-                    Err(e) => {
-                        app.history_detail = Some(format!("cannot read {}: {e}", path.display()))
+/// Execute effects: spawn async work (results come back as UiMsg), run
+/// fast inline work (history scan, prefs persistence).
+fn run_effects(state: &mut State, effects: Vec<Effect>) {
+    for effect in effects {
+        match effect {
+            Effect::FetchModels { provider, force } => {
+                let provider = Arc::clone(&provider);
+                let mdc = Arc::clone(&state.modelsdev);
+                let tx = state.ui_tx.clone();
+                let provider_id = provider.id().to_string();
+                tokio::spawn(async move {
+                    if force {
+                        let _ = mdc.refresh().await; // fall back to stale cache below
                     }
+                    let catalog =
+                        lmhub_providers::resolve_model_catalog(provider.as_ref(), &mdc).await;
+                    let snapshot = match mdc.load().await {
+                        Ok(s) => Some(Arc::new(s)),
+                        Err(e) => {
+                            let _ = tx.send(UiMsg::Notice(format!(
+                                "models.dev catalog unavailable: {e}"
+                            )));
+                            None
+                        }
+                    };
+                    let _ = tx.send(UiMsg::ModelsReady {
+                        requested_for: provider_id,
+                        catalog: Box::new(catalog),
+                        snapshot,
+                    });
+                });
+            }
+            Effect::LaunchRun { run_id } => {
+                if let Some(spec) = build_agent_spec(state, run_id) {
+                    spawn_run(state.ui_tx.clone(), run_id, spec);
                 }
             }
+            Effect::ScanHistory => {
+                state.history.rows = crate::history::scan_history(&state.output_base);
+                state.history.idx = state
+                    .history
+                    .idx
+                    .min(state.history.rows.len().saturating_sub(1));
+            }
+            Effect::SavePrefs => state.prefs.save(&state.prefs_path),
         }
-        _ => {}
     }
+}
+
+/// Assemble the agent `RunSpec` for a session from state + config.
+fn build_agent_spec(state: &State, run_id: u64) -> Option<lmhub_agent::RunSpec> {
+    let run = state.runs.find(run_id)?;
+    let cancel = run.cancel.clone()?;
+    Some(lmhub_agent::RunSpec {
+        provider: run.provider.clone(),
+        family_override: run.model.family.clone(),
+        model: run.model.clone(),
+        reasoning: run.reasoning_level,
+        system_prompt: run.system_prompt.clone(),
+        task: run.task.clone(),
+        output_base: state.output_base.clone(),
+        pricing: run.pricing_ctx.clone(),
+        enable_prompt_cache: true,
+        max_turns: state.config.max_turns,
+        max_output_tokens: state.config.max_output_tokens,
+        deadline: state.config.run_timeout(),
+        cancel,
+        sandbox: lmhub_sandbox::SandboxConfig {
+            allowed_commands: state.config.allowed_commands.clone(),
+            command_timeout: state.config.command_timeout(),
+            read_file_max_bytes: state.config.read_file_max_bytes,
+            write_file_max_bytes: state.config.write_file_max_bytes,
+            runtime: state.sandbox_runtime.clone(),
+        },
+    })
+}
+
+/// Bridge one agent run into tagged UI messages.
+fn spawn_run(ui_tx: mpsc::UnboundedSender<UiMsg>, run_id: u64, spec: lmhub_agent::RunSpec) {
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<lmhub_core::RunEvent>();
+    let app_tx = ui_tx.clone();
+    tokio::spawn(async move {
+        let handle = tokio::spawn(lmhub_agent::execute(spec, Some(event_tx)));
+        // Bridge agent events into UI messages, tagged with the run id.
+        while let Some(event) = event_rx.recv().await {
+            let _ = app_tx.send(UiMsg::RunEvent { run_id, event });
+        }
+        let outcome = handle.await;
+        let result = match outcome {
+            Ok(Ok(out)) => Ok(Box::new(out)),
+            Ok(Err(e)) => Err(format!("run failed: {e}")),
+            Err(join_err) => Err(format!("task panicked: {join_err}")),
+        };
+        let _ = app_tx.send(UiMsg::RunFinished { run_id, result });
+    });
 }

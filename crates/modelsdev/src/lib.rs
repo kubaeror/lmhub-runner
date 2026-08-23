@@ -34,6 +34,7 @@ pub struct SnapshotMeta {
 
 /// A catalog plus its provenance. `stale == true` means the network refresh
 /// failed and an older cached copy was served — callers should warn.
+#[derive(Clone)]
 pub struct CatalogSnapshot {
     pub catalog: Catalog,
     pub fetched_at: String,

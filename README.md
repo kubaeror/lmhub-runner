@@ -12,12 +12,25 @@ cargo run
 
 The interactive TUI starts — no CLI flags:
 
-1. **Setup** tab: pick a provider → models auto-load (source shown) → pick a
+1. **Setup** tab: searchable provider list (just type to filter; grouped by
+   protocol, `F` stars favorites) → models auto-load (source shown) → pick a
    model → reasoning level → system prompt (`d` sets the default) → type a
-   task → `Enter` runs it.
-2. **Run** tab: live events feed, tokens/cache/cost/tool-call counters,
-   `c` cancels.
-3. **History** tab: previous runs; `Enter` opens their `statistics.json`.
+   task (`↑`/`↓` recall past tasks) → `Enter` runs it.
+2. **Run** tab: multiple concurrent sessions (`[`/`]` switch) with a
+   structured transcript of turns and tool calls, live token/cache/cost
+   counters, `c` cancels, `R` reruns. Runs beyond the concurrency cap
+   (`max_concurrent_runs`, default 2, in `~/.config/lmhub/ui.json`) queue as
+   pending and auto-start when a slot frees.
+3. **Bulk runs**: `m` enables multi-select in the models pane, `Space`
+   checks models **across providers** (selection survives switching), `x`
+   on the task launches them all after a confirmation modal.
+4. **History** tab: previous runs; `Enter` opens their `statistics.json`
+   pretty-printed (tokens, performance, tool calls, pricing — not raw JSON).
+
+`:` opens the command palette (run, bulk run, cancel all, rescan history,
+open output dir, quit). Mouse clicks focus panes and switch tabs. Last
+selections, favorites, task history and the concurrency cap persist in
+`~/.config/lmhub/ui.json`.
 
 Providers need an API key in the environment: `OPENAI_API_KEY`,
 `ANTHROPIC_API_KEY`, or the env var named in a custom provider's TOML.
@@ -180,6 +193,25 @@ write_file_max_bytes = 1000000
 sandbox = "auto"        # auto | bwrap | legacy (command isolation backend)
 ```
 
+UI preferences (last selections, favorites, task history, concurrency cap)
+live separately in `~/.config/lmhub/ui.json`:
+
+UI preferences (last selections, favorites, task history, concurrency cap)
+live separately in `~/.config/lmhub/ui.json`:
+
+```json
+{
+  "last_provider": "anthropic",
+  "last_model": "claude-3-7-sonnet",
+  "last_reasoning": "high",
+  "last_prompt": "default",
+  "last_task": "build a small CLI",
+  "favorites": ["openai"],
+  "task_history": ["build a small CLI", "…"],
+  "max_concurrent_runs": 2
+}
+```
+
 Paths default to the project directory and OS config/cache dirs; every path
 is overridable via environment: `LMHUB_CONFIG_DIR`, `LMHUB_CACHE_DIR`,
 `LMHUB_OUTPUT_DIR`, `LMHUB_PROVIDERS_DIR`.
@@ -193,7 +225,8 @@ crates/providers   native + routed adapters (194-provider catalog), model
                    resolution chain, SigV4/JWT/device-flow helpers
 crates/sandbox     path jail, allowlisted process runner, the 7 tools
 crates/agent       agent loop, event sink, cost computation
-crates/tui         ratatui interface
+crates/tui         ratatui interface — Elm-style State/Action/reduce core,
+                   command palette, multi-run sessions, bulk start
 xtask              `gen-providers` catalog snapshot regeneration
 src/main.rs        wiring
 ```

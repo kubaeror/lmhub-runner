@@ -989,9 +989,7 @@ name = "lmhub-tui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "chrono",
  "crossterm",
- "futures",
  "lmhub-agent",
  "lmhub-core",
  "lmhub-modelsdev",
@@ -1000,10 +998,10 @@ dependencies = [
  "ratatui",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-util",
  "tracing",
- "uuid",
 ]
 
 [[package]]

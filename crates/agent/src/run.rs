@@ -42,6 +42,7 @@ pub struct RunSpec {
     pub sandbox: SandboxConfig,
 }
 
+#[derive(Debug, Clone)]
 pub struct RunOutcome {
     pub stats: lmhub_core::StatisticsDocument,
     pub run_dir: PathBuf,
