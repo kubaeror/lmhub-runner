@@ -39,7 +39,6 @@ pub enum UiMsg {
     RunEvent(lmhub_core::RunEvent),
     /// Terminal state of one background run.
     RunFinished(Result<Box<lmhub_agent::RunOutcome>, String>),
-    Log(String),
     /// Transient status line (connect flows etc.).
     Notice(String),
 }
@@ -53,6 +52,9 @@ pub struct TuiContext {
     pub output_base: PathBuf,
     pub auth_store: Arc<std::sync::Mutex<lmhub_core::AuthStore>>,
 }
+
+/// UI tick: how often the screen redraws even without input/events.
+const TICK_INTERVAL: Duration = Duration::from_millis(200);
 
 pub async fn run_tui(ctx: TuiContext) -> anyhow::Result<()> {
     use anyhow::Context as _;
@@ -86,9 +88,9 @@ pub async fn run_tui(ctx: TuiContext) -> anyhow::Result<()> {
         ui_tx,
     );
     // Auto-load models for the initially selected provider.
-    app.request_models();
+    app.request_models(false);
 
-    let mut tick = tokio::time::interval(Duration::from_millis(200));
+    let mut tick = tokio::time::interval(TICK_INTERVAL);
 
     let result = loop {
         terminal.draw(|f| ui::draw(f, &mut app))?;
@@ -107,6 +109,30 @@ pub async fn run_tui(ctx: TuiContext) -> anyhow::Result<()> {
             break Ok(());
         }
     };
+
+    // Force-quit with a run still winding down: give a cancelled run a short
+    // grace period to write statistics.json before the tokio runtime is
+    // dropped (dropping it would kill the agent task mid-write).
+    let unfinished_run = app
+        .run
+        .as_ref()
+        .map(|r| r.finished_line.is_none())
+        .unwrap_or(false);
+    if unfinished_run {
+        let grace = tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(msg) = ui_rx.recv().await {
+                if matches!(&msg, UiMsg::RunFinished(_)) {
+                    app.handle_ui_msg(msg);
+                    break;
+                }
+                app.handle_ui_msg(msg);
+            }
+        })
+        .await;
+        if grace.is_err() {
+            tracing::warn!("force-quit: run did not finish within 5s; dropping task");
+        }
+    }
 
     disable_raw_mode()?;
     execute!(std::io::stdout(), LeaveAlternateScreen)?;
@@ -164,13 +190,15 @@ fn handle_event(app: &mut App, event: Event) {
         },
     }
 
-    // Model refresh: F5 always; 'r' except while typing the provider filter.
+    // Model refresh: F5 force-refreshes (bypasses the Models.dev TTL); 'r'
+    // reloads from cache. Neither fires while typing (provider filter or task
+    // text) so typing never wipes the model selection.
     if app.tab == app::Tab::Setup
         && (matches!(key.code, KeyCode::F(5))
             || (matches!(key.code, KeyCode::Char('r'))
-                && !(app.tab == app::Tab::Setup && app.focus == Focus::Providers)))
+                && !matches!(app.focus, Focus::Providers | Focus::Task)))
     {
-        app.request_models();
+        app.request_models(matches!(key.code, KeyCode::F(5)));
     }
 }
 
@@ -214,17 +242,17 @@ fn setup_keys(app: &mut App, code: KeyCode) {
                         .provider_idx
                         .saturating_sub(1)
                         .min(count.saturating_sub(1));
-                    app.request_models();
+                    app.request_models(false);
                 }
             }
             KeyCode::Down => {
                 let count = app.filtered_indices().len();
                 if app.provider_idx + 1 < count {
                     app.provider_idx += 1;
-                    app.request_models();
+                    app.request_models(false);
                 } else if count > 0 && app.provider_idx >= count {
                     app.provider_idx = count - 1;
-                    app.request_models();
+                    app.request_models(false);
                 }
             }
             KeyCode::Enter => app.start_connect(),

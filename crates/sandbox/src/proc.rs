@@ -182,8 +182,9 @@ pub async fn run_allowlisted(
         #[cfg(unix)]
         {
             terminate_group(pid);
-            let exited =
-                tokio::time::timeout(Duration::from_secs(2), child.wait()).await.is_ok();
+            let exited = tokio::time::timeout(Duration::from_secs(2), child.wait())
+                .await
+                .is_ok();
             if !exited {
                 tracing::warn!(?pid, "run_command ignored SIGTERM; sending SIGKILL");
                 kill_group(pid);

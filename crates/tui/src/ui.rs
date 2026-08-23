@@ -472,12 +472,18 @@ fn draw_run(f: &mut Frame, app: &mut App, area: Rect) {
     } else {
         None
     };
+    // Live estimate — same math as agent::pricing::compute so the number
+    // matches the final statistics.json: cache-write tokens are subtracted
+    // from plain input and billed at their own rate when known.
     let cost_est = run.pricing.as_ref().map(|p| {
         let cr = u.cache_read_tokens.unwrap_or(0);
-        let plain = u.input_tokens.saturating_sub(cr);
+        let cw = u.cache_write_tokens.unwrap_or(0);
+        let plain = u.input_tokens.saturating_sub(cr).saturating_sub(cw);
+        let cache_write_usd = cw as f64 / 1e6 * p.cache_write_per_million_usd.unwrap_or(0.0);
         plain as f64 / 1e6 * p.input_per_million_usd
             + u.output_tokens as f64 / 1e6 * p.output_per_million_usd
             + cr as f64 / 1e6 * p.cache_read_per_million_usd.unwrap_or(0.0)
+            + cache_write_usd
     });
     let mut lines = vec![
         Line::from(format!("provider : {}", run.provider_id)),

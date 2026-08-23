@@ -5,22 +5,15 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 /// Feature flags of a whole provider/adapter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Defaults are fail-safe (all false): adapters must opt in to features they
+/// actually implement, so a forgetful adapter never over-claims.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct ProviderCaps {
     pub tool_calls: bool,
     pub reasoning: bool,
     pub prompt_caching: bool,
-}
-
-impl Default for ProviderCaps {
-    fn default() -> Self {
-        Self {
-            tool_calls: true,
-            reasoning: true,
-            prompt_caching: true,
-        }
-    }
 }
 
 impl From<ProviderCaps> for Capabilities {

@@ -71,8 +71,6 @@ impl RunMetrics {
             delta.cache_read_tokens.unwrap_or(0) > 0 || delta.cache_write_tokens.unwrap_or(0) > 0;
         if used {
             self.provider_cache_used = Some(true);
-        } else if self.provider_cache_used.is_none() && self.llm_requests == 0 {
-            // stays None until first request decides
         }
     }
 

@@ -41,8 +41,15 @@ impl Default for RetryPolicy {
 static POLICY: OnceLock<RetryPolicy> = OnceLock::new();
 
 /// Install the process-wide policy (called from main with AppConfig).
+/// `max_attempts` is clamped to >= 1 so the retry loop always runs.
 pub fn init_retry_policy(policy: RetryPolicy) {
-    let _ = POLICY.set(policy);
+    let policy = RetryPolicy {
+        max_attempts: policy.max_attempts.max(1),
+        ..policy
+    };
+    if POLICY.set(policy).is_err() {
+        tracing::warn!("init_retry_policy called twice; second policy ignored");
+    }
 }
 
 fn policy() -> RetryPolicy {
@@ -50,7 +57,7 @@ fn policy() -> RetryPolicy {
 }
 
 fn retryable_status(code: u16) -> bool {
-    matches!(code, 429 | 500 | 502 | 503 | 504)
+    matches!(code, 408 | 425 | 429 | 500 | 502 | 503 | 504)
 }
 
 /// Pure decision: how long to wait before retry number `attempt`
@@ -144,15 +151,26 @@ pub(crate) async fn send_request(
                     sleep(jitter(delay)).await;
                     continue;
                 }
-                // Exhausted (or fatal status) — hand the response over so the
-                // caller's error text stays identical to previous behavior.
+                // Retries exhausted on a retryable status: classify as
+                // Transient (with the upstream's body) so callers can tell a
+                // 429-exhausted request from a hard 4xx.
                 tracing::warn!(
                     url = %redact::scrub(url),
                     status = status.as_u16(),
                     attempts = attempt + 1,
                     "giving up after retries"
                 );
-                return Ok(resp);
+                let text = resp.text().await.unwrap_or_default();
+                return Err(CoreError::Transient {
+                    code: Some(status.as_u16()),
+                    retry_after_secs: retry_after,
+                    message: format!(
+                        "HTTP {}: {} (after {} attempts)",
+                        status.as_u16(),
+                        truncate_body(&text),
+                        attempt + 1
+                    ),
+                });
             }
             Err(e) => {
                 let transport_transient =

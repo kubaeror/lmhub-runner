@@ -312,11 +312,7 @@ impl ToolRuntime {
             let n = match file.read(&mut buf).await {
                 Ok(n) => n,
                 Err(e) => {
-                    return ToolOutcome::fail(
-                        format!("cannot read {raw:?}: {e}"),
-                        json!({}),
-                        false,
-                    )
+                    return ToolOutcome::fail(format!("cannot read {raw:?}: {e}"), json!({}), false)
                 }
             };
             if n == 0 {

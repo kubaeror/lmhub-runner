@@ -58,6 +58,9 @@ async fn gen_providers() -> anyhow::Result<()> {
         "providers": providers,
     });
     let rendered = serde_json::to_string_pretty(&doc)? + "\n";
+    if let Some(parent) = std::path::Path::new(OUT_PATH).parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     std::fs::write(OUT_PATH, rendered)?;
     println!(
         "wrote {OUT_PATH}: {} providers, snapshot {version}",

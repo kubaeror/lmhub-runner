@@ -53,10 +53,12 @@ async fn fetch_token(form: &[(&str, &str)], url: &str) -> Result<(String, u64)> 
     Ok((token, expires_in))
 }
 
-/// IBM IAM (watsonx): apikey → bearer. Cache keyed by apikey hash prefix.
+/// IBM IAM (watsonx): apikey → bearer. Cache keyed by a hash of the apikey
+/// so changing the key can never serve a stale token minted for the old one.
 pub async fn ibm_iam_token(api_key: &str) -> Result<String> {
+    let cache_key = format!("iam:{}", &api_key_hash(api_key)[..16]);
     if let Some((key, c)) = cached().lock().unwrap().as_ref() {
-        if key == "ibm-iam" && c.valid_until > Instant::now() {
+        if *key == cache_key && c.valid_until > Instant::now() {
             return Ok(c.token.clone());
         }
     }
@@ -69,7 +71,7 @@ pub async fn ibm_iam_token(api_key: &str) -> Result<String> {
     )
     .await?;
     *cached().lock().unwrap() = Some((
-        "ibm-iam".to_string(),
+        cache_key,
         CachedToken {
             token: token.clone(),
             valid_until: Instant::now()
@@ -77,6 +79,11 @@ pub async fn ibm_iam_token(api_key: &str) -> Result<String> {
         },
     ));
     Ok(token)
+}
+
+fn api_key_hash(key: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(key.as_bytes()))
 }
 
 /// Generic OAuth2 client-credentials against a fixed token URL.

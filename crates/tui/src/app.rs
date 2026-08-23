@@ -325,7 +325,9 @@ impl App {
     }
 
     /// Kick off async resolution of the model list for the current provider.
-    pub fn request_models(&mut self) {
+    /// `force` (F5) bypasses the Models.dev TTL and fetches a fresh catalog;
+    /// failures fall back to the cached copy with a visible warning.
+    pub fn request_models(&mut self, force: bool) {
         let Some(provider) = self.selected_provider() else {
             return;
         };
@@ -340,8 +342,21 @@ impl App {
         let tx = self.ui_tx.clone();
         let requested_for = provider.id().to_string();
         tokio::spawn(async move {
+            if force {
+                let _ = mdc.refresh().await; // fall back to stale cache below
+            }
             let catalog = lmhub_providers::resolve_model_catalog(provider.as_ref(), &mdc).await;
-            let snapshot = mdc.load().await.ok().map(Arc::new);
+            let snapshot = match mdc.load().await {
+                Ok(s) => Some(Arc::new(s)),
+                Err(e) => {
+                    // Never fail silently: the status line explains why
+                    // pricing/catalog data is missing.
+                    let _ = tx.send(UiMsg::Notice(format!(
+                        "models.dev catalog unavailable: {e}"
+                    )));
+                    None
+                }
+            };
             let _ = tx.send(UiMsg::ModelsReady(
                 Box::new(requested_for),
                 Box::new(catalog),
@@ -479,7 +494,6 @@ impl App {
                     });
                 }
             }
-            UiMsg::Log(line) => self.push_log(line),
             UiMsg::Notice(line) => self.push_notice(line),
         }
     }

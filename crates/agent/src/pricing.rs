@@ -40,11 +40,20 @@ pub fn compute(ctx: Option<&PricingContext>, usage: &Usage) -> PricingOutcome {
 
     let input_usd = per_million(plain_input, p.input_per_million_usd);
     let output_usd = per_million(usage.output_tokens, p.output_per_million_usd);
-    let cache_read_usd = p
-        .cache_read_per_million_usd
-        .map(|price| per_million(cache_read, price));
-    // Cache write has its own price only on some providers (e.g. Anthropic).
+    // Cache read has its own price only on some providers; never guess.
     let mut warnings = Vec::new();
+    let cache_read_usd = match p.cache_read_per_million_usd {
+        Some(price) => Some(per_million(cache_read, price)),
+        None if cache_read > 0 => {
+            warnings.push(format!(
+                "cache-read price unknown for this route but {cache_read} cache-read tokens were used; cacheReadUsd recorded as null"
+            ));
+            None
+        }
+        // No reads and no price → null (matches schema example; nothing was spent).
+        None => None,
+    };
+    // Cache write has its own price only on some providers (e.g. Anthropic).
     let cache_write_usd = match p.cache_write_per_million_usd {
         Some(price) => Some(per_million(cache_write, price)),
         None if cache_write > 0 => {

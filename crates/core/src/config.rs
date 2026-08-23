@@ -122,3 +122,38 @@ impl AppConfig {
         std::time::Duration::from_secs(self.command_timeout_secs)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_clamps_zero_values_and_retry_cap() {
+        let mut cfg = AppConfig {
+            run_timeout_secs: 0,
+            max_turns: 0,
+            command_timeout_secs: 0,
+            max_retries: 0,
+            retry_base_ms: 0,
+            retry_cap_ms: 0,
+            ..AppConfig::default()
+        };
+        cfg.sanitize();
+        assert!(cfg.run_timeout_secs >= 1);
+        assert!(cfg.max_turns >= 1);
+        assert!(cfg.command_timeout_secs >= 1);
+        assert!(cfg.max_retries >= 1);
+        assert!(cfg.retry_base_ms >= 1);
+        assert!(cfg.retry_cap_ms >= cfg.retry_base_ms);
+    }
+
+    #[test]
+    fn sanitize_restores_empty_allowlist() {
+        let mut cfg = AppConfig {
+            allowed_commands: vec!["  ".into(), "".into()],
+            ..AppConfig::default()
+        };
+        cfg.sanitize();
+        assert_eq!(cfg.allowed_commands, vec!["node", "npm", "npx"]);
+    }
+}

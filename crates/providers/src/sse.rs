@@ -32,14 +32,27 @@ pub(crate) fn sse_events(
                     return Some((Ok(event), state));
                 }
                 if state.eof {
-                    // Flush a trailing unterminated block (lenient servers).
+                    // Flush a trailing unterminated block only if it ends at
+                    // a line boundary; a cut-off mid-line tail is dropped.
                     if let Some(event) = take_final(&mut state.buf) {
                         return Some((Ok(event), state));
                     }
                     return None;
                 }
                 match state.body.as_mut().next().await {
-                    Some(Ok(chunk)) => state.buf.extend_from_slice(&chunk),
+                    Some(Ok(chunk)) => {
+                        state.buf.extend_from_slice(&chunk);
+                        // A server that never sends a blank line must not be
+                        // able to grow our buffer without bound.
+                        if state.buf.len() > MAX_BUFFERED {
+                            state.buf.clear();
+                            let err = CoreError::Http(
+                                "SSE stream exceeded 4 MiB without a complete event; aborting"
+                                    .into(),
+                            );
+                            return Some((Err(err), state));
+                        }
+                    }
                     Some(Err(e)) => {
                         state.eof = true;
                         let err = CoreError::Http(redact_safe(&e.to_string()));
@@ -51,6 +64,9 @@ pub(crate) fn sse_events(
         },
     )
 }
+
+/// Upper bound on buffered bytes awaiting a blank-line terminator.
+const MAX_BUFFERED: usize = 4 * 1024 * 1024;
 
 struct State {
     body: std::pin::Pin<Box<dyn futures::Stream<Item = reqwest::Result<bytes::Bytes>> + Send>>,
@@ -76,6 +92,12 @@ fn take_event(buf: &mut Vec<u8>) -> Option<SseEvent> {
 
 fn take_final(buf: &mut Vec<u8>) -> Option<SseEvent> {
     if buf.is_empty() {
+        return None;
+    }
+    // Only flush a trailing block that ends at a line boundary; a cut-off
+    // mid-line tail is a truncated event, not valid data.
+    if !buf.ends_with(b"\n") {
+        buf.clear();
         return None;
     }
     let text = String::from_utf8_lossy(buf).to_string();
@@ -154,15 +176,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ignores_comments_and_flushes_trailing_block() {
+    async fn ignores_comments_and_flushes_complete_trailing_line() {
         let body = stream_of(vec![
             ": keep-alive\ndata: y\n\n".to_string(),
-            "data: tail".to_string(), // no final blank line
+            "data: tail\n".to_string(), // complete line, no final blank line
         ]);
         let events: Vec<SseEvent> = sse_events(body).map(|e| e.unwrap()).collect().await;
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].data, "y");
         assert_eq!(events[1].data, "tail");
+    }
+
+    #[tokio::test]
+    async fn drops_cut_off_trailing_line() {
+        let body = stream_of(vec![
+            "data: y\n\n".to_string(),
+            "data: trun".to_string(), // cut off mid-line — not an event
+        ]);
+        let events: Vec<SseEvent> = sse_events(body).map(|e| e.unwrap()).collect().await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].data, "y");
+    }
+
+    #[tokio::test]
+    async fn aborts_when_buffer_grows_without_terminator() {
+        let big = "data: ".repeat(1_000_000); // ~6 MiB, no blank line
+        let events: Vec<Result<SseEvent>> = sse_events(stream_of(vec![big])).collect().await;
+        assert!(matches!(events.as_slice(), [Err(CoreError::Http(_))]));
     }
 
     #[test]

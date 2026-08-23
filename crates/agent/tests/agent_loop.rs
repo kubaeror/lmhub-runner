@@ -224,3 +224,39 @@ async fn provider_failure_still_writes_statistics() {
     let errors = std::fs::read_to_string(outcome.run_dir.join("errors.log")).unwrap();
     assert!(errors.contains("provider_api"), "{errors}");
 }
+
+#[tokio::test]
+async fn consecutive_runs_never_share_a_run_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mk = |fail: bool| {
+        execute(
+            spec(
+                tmp.path(),
+                Arc::new(MockProvider {
+                    fail_on_first_call: fail,
+                }),
+            ),
+            None,
+        )
+    };
+    let first = mk(false).await.unwrap();
+    let second = mk(false).await.unwrap();
+    assert_ne!(first.run_dir, second.run_dir, "run dirs must be unique");
+    // The shared route dir contains both runs; neither clobbers the other.
+    assert_eq!(
+        first.run_dir.parent(),
+        Some(
+            tmp.path()
+                .join("MockFam")
+                .join("mock-1")
+                .join("high")
+                .as_path()
+        )
+    );
+    assert!(first.run_dir.join("statistics.json").is_file());
+    assert!(second.run_dir.join("statistics.json").is_file());
+    // Workspaces are fresh per run (the dirty-workspace bug is gone).
+    assert!(!first.workspace_dir.join("marker.txt").exists());
+    std::fs::write(first.workspace_dir.join("marker.txt"), "stale").unwrap();
+    assert!(!second.workspace_dir.join("marker.txt").exists());
+}

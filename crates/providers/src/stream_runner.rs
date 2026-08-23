@@ -31,7 +31,11 @@ async fn ensure_success(resp: reqwest::Response) -> Result<reqwest::Response> {
 async fn status_error(resp: reqwest::Response) -> CoreError {
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
-    CoreError::Provider(format!("HTTP {}: {}", status.as_u16(), truncate_body(&text)))
+    CoreError::Provider(format!(
+        "HTTP {}: {}",
+        status.as_u16(),
+        truncate_body(&text)
+    ))
 }
 
 /// Copy of the request with reasoning disabled (degradation path when a
@@ -225,8 +229,7 @@ pub(crate) async fn anthropic_sse(
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         let lower = text.to_ascii_lowercase();
-        let strip_thinking =
-            lower.contains("thinking") && request.reasoning != ReasoningLevel::Off;
+        let strip_thinking = lower.contains("thinking") && request.reasoning != ReasoningLevel::Off;
         if !strip_thinking {
             return Err(CoreError::Provider(format!(
                 "HTTP {}: {}",

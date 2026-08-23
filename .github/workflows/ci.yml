@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Monthly snapshot-drift check (README documents it).
+  schedule:
+    - cron: "0 3 1 * *" # 03:00 UTC on the 1st of every month
 
 env:
   CARGO_TERM_COLOR: always
@@ -54,7 +57,8 @@ jobs:
   catalog-drift:
     name: models.dev snapshot drift
     runs-on: ubuntu-latest
-    continue-on-error: true # informational; refresh via xtask when it fires
+    # Fails when the bundled catalog no longer matches models.dev (refresh
+    # via xtask); scheduled monthly in addition to push/PR runs.
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -63,5 +67,6 @@ jobs:
       - name: Detect changes
         run: |
           if ! git diff --exit-code crates/providers/src/known/known_providers.json >/dev/null; then
-            echo "::warning::models.dev catalog drifted — regenerate with: cargo run -p xtask -- gen-providers"
+            echo "::error::models.dev catalog drifted — regenerate with: cargo run -p xtask -- gen-providers"
+            exit 1
           fi

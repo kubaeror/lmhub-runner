@@ -33,6 +33,8 @@ pub enum DeviceFlowEvent {
     Authorized { github_token: String },
     /// Device code expired before authorization.
     Expired,
+    /// GitHub asked the client to slow down; keep polling at a longer interval.
+    SlowDown,
     /// Unrecoverable error from GitHub.
     Failed(String),
 }
@@ -50,7 +52,8 @@ pub fn interpret_poll_response(status: u16, body: &Value) -> Option<DeviceFlowEv
         400 | 428 => {
             let err = body.get("error").and_then(|v| v.as_str()).unwrap_or("");
             match err {
-                "authorization_pending" | "slow_down" => None, // keep polling
+                "authorization_pending" => None, // keep polling
+                "slow_down" => Some(DeviceFlowEvent::SlowDown),
                 "expired_token" => Some(DeviceFlowEvent::Expired),
                 _ => Some(DeviceFlowEvent::Failed(err.to_string())),
             }
@@ -69,10 +72,21 @@ pub async fn start_device_flow() -> Result<DeviceFlowEvent> {
         .send()
         .await
         .map_err(|e| CoreError::Http(e.to_string()))?;
+    let status = resp.status();
     let body: Value = resp
         .json()
         .await
         .map_err(|e| CoreError::Parse(e.to_string()))?;
+    if !status.is_success() {
+        return Err(CoreError::Provider(format!(
+            "copilot device-code start failed: HTTP {} {}",
+            status.as_u16(),
+            body.get("error_description")
+                .and_then(|v| v.as_str())
+                .or_else(|| body.get("error").and_then(|v| v.as_str()))
+                .unwrap_or("unknown error")
+        )));
+    }
     Ok(DeviceFlowEvent::Awaiting {
         user_code: body
             .get("user_code")
@@ -110,14 +124,36 @@ pub async fn run_full_flow(
     notify(format!(
         "copilot: open {verification_uri} and enter code {user_code} (waiting up to 15 min)"
     ));
+    let mut slow_down = false;
+    let mut consecutive_errors = 0u32;
     for _ in 0..180 {
-        tokio::time::sleep(Duration::from_secs(5)).await;
-        // Transient network errors must not kill the flow — keep polling.
+        // GitHub's spec: poll every 5s, every 10s after a slow_down.
+        tokio::time::sleep(if slow_down {
+            Duration::from_secs(10)
+        } else {
+            Duration::from_secs(5)
+        })
+        .await;
+        slow_down = false;
+        // Transient network errors must not kill the flow — but a run of
+        // failures that will never recover should not burn 15 minutes.
         let event = match poll_device_flow(&device_code).await {
             Ok(Some(ev)) => ev,
-            Ok(None) => continue,
-            Err(_) => continue,
+            Ok(None) => {
+                consecutive_errors = 0;
+                continue;
+            }
+            Err(_) => {
+                consecutive_errors += 1;
+                if consecutive_errors >= 5 {
+                    return Err(CoreError::Http(
+                        "copilot device flow: 5 consecutive poll failures; giving up".into(),
+                    ));
+                }
+                continue;
+            }
         };
+        consecutive_errors = 0;
         return match event {
             DeviceFlowEvent::Authorized { github_token } => {
                 let (token, expires_at) = copilot_token(&github_token).await?;
@@ -138,11 +174,17 @@ pub async fn run_full_flow(
                 notify("copilot: connected ✔".into());
                 Ok(())
             }
+            DeviceFlowEvent::SlowDown => {
+                slow_down = true;
+                continue;
+            }
             DeviceFlowEvent::Expired => Err(CoreError::Other(
                 "device code expired — restart the connect flow".into(),
             )),
             DeviceFlowEvent::Failed(msg) => Err(CoreError::Provider(format!("copilot: {msg}"))),
-            DeviceFlowEvent::Awaiting { .. } => Ok(()),
+            DeviceFlowEvent::Awaiting { .. } => {
+                continue; // unreachable from polls; keep looping defensively
+            }
         };
     }
     Err(CoreError::Timeout)
@@ -208,25 +250,6 @@ pub async fn copilot_token(github_token: &str) -> Result<(String, i64)> {
     Ok((token, expires_at))
 }
 
-/// Persist an authorized flow into the auth store as an oauth credential.
-pub fn store_authorized(
-    store: &mut AuthStore,
-    github_token: &str,
-    copilot_token: String,
-    expires_at: i64,
-) {
-    store.set_credential(
-        PROVIDER_ID,
-        StoredCredential {
-            kind: "oauth".into(),
-            key: Some(github_token.to_string()),
-            access_token: Some(copilot_token),
-            expires_at: Some(expires_at),
-            refresh_token: None,
-        },
-    );
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,7 +264,7 @@ mod tests {
         );
         assert_eq!(
             interpret_poll_response(428, &json!({"error": "slow_down"})),
-            None
+            Some(DeviceFlowEvent::SlowDown)
         );
         assert_eq!(
             interpret_poll_response(400, &json!({"error": "expired_token"})),
@@ -256,18 +279,5 @@ mod tests {
                 github_token: "gho_x".into()
             })
         );
-    }
-
-    #[test]
-    fn stores_oauth_blob() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = AuthStore::load(dir.path().join("auth.json"));
-        store_authorized(
-            &mut store,
-            "ghu_refresh",
-            "tid_live".to_string(),
-            9_999_999_999,
-        );
-        assert_eq!(store.secret_for(PROVIDER_ID).as_deref(), Some("tid_live"));
     }
 }

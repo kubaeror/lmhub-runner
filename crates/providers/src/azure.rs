@@ -9,7 +9,6 @@
 use crate::http;
 use crate::wire_openai::{self, OpenAiWireOpts};
 use lmhub_core::{ChatRequest, ChatResponse, CoreError, Result};
-use serde_json::Value;
 use std::time::Instant;
 
 pub const DEFAULT_API_VERSION: &str = "2024-10-21";
@@ -41,48 +40,103 @@ pub async fn chat(
         base_url.trim_end_matches('/'),
         urlencode(request.model.as_str()),
     );
-    let mut payload = wire_openai::build_chat_payload(
+    let payload = wire_openai::build_chat_payload(
         request,
         OpenAiWireOpts {
             include_reasoning_effort: true,
         },
     );
-    // Azure rejects `stream:false` being absent is fine; but reasoning_effort
-    // uses the same field name. Nothing else to change.
-    let _ = &mut payload;
-
     let headers = vec![("api-key".to_string(), api_key.to_string())];
-    let headers_retry = headers.clone();
     let started = Instant::now();
-    let body: Value = http::post_json(http_client, &url, headers, &payload).await?;
+
+    // Some deployments reject optional params (`tools`, `reasoning_effort`):
+    // they answer HTTP 400 naming the field. Degrade once like native OpenAI.
+    let body = match http::post_json(http_client, &url, headers.clone(), &payload).await {
+        Ok(b) => b,
+        Err(e) => {
+            let degraded = degrade_if_rejected(http_client, &e, request, &url, &headers).await;
+            if let Some(resp) = degraded {
+                return Ok(resp);
+            }
+            return Err(e);
+        }
+    };
     let duration_ms = started.elapsed().as_millis() as u64;
 
-    // Some deployments reject optional params; degrade once like native OpenAI.
     match wire_openai::parse_chat_response(&body, duration_ms, Vec::new()) {
         Ok(resp) => Ok(resp),
         Err(CoreError::Parse(msg)) => {
             if msg.contains("choices") && payload.get("tools").is_some() {
-                let mut stripped = request.clone();
-                stripped.tools.clear();
-                stripped.reasoning = lmhub_core::ReasoningLevel::Off;
-                let plain = wire_openai::build_chat_payload(
-                    &stripped,
-                    OpenAiWireOpts {
-                        include_reasoning_effort: false,
-                    },
-                );
-                let started2 = Instant::now();
-                let body2 = http::post_json(http_client, &url, headers_retry, &plain).await?;
-                return wire_openai::parse_chat_response(
-                    &body2,
-                    started2.elapsed().as_millis() as u64,
-                    vec!["deployment rejected `tools`; retried without them".into()],
-                );
+                if let Some(resp) = degrade_once(
+                    http_client,
+                    request,
+                    &url,
+                    &headers,
+                    "deployment rejected `tools`; retried without them",
+                )
+                .await
+                {
+                    return Ok(resp);
+                }
             }
             Err(CoreError::Parse(msg))
         }
         Err(e) => Err(e),
     }
+}
+
+/// A 4xx whose body names `tools`/`reasoning_effort` means the deployment
+/// rejects the optional params — retry once without them.
+async fn degrade_if_rejected(
+    http_client: &reqwest::Client,
+    err: &CoreError,
+    request: &ChatRequest,
+    url: &str,
+    headers: &[(String, String)],
+) -> Option<ChatResponse> {
+    if let CoreError::Provider(msg) = err {
+        let lower = msg.to_ascii_lowercase();
+        if lower.contains("tools") || lower.contains("reasoning_effort") {
+            return degrade_once(
+                http_client,
+                request,
+                url,
+                headers,
+                "deployment rejected optional params; retried without them",
+            )
+            .await;
+        }
+    }
+    None
+}
+
+/// Retry once with tools cleared and reasoning off.
+async fn degrade_once(
+    http_client: &reqwest::Client,
+    request: &ChatRequest,
+    url: &str,
+    headers: &[(String, String)],
+    warning: &str,
+) -> Option<ChatResponse> {
+    let mut stripped = request.clone();
+    stripped.tools.clear();
+    stripped.reasoning = lmhub_core::ReasoningLevel::Off;
+    let plain = wire_openai::build_chat_payload(
+        &stripped,
+        OpenAiWireOpts {
+            include_reasoning_effort: false,
+        },
+    );
+    let started = Instant::now();
+    let body = http::post_json(http_client, url, headers.to_vec(), &plain)
+        .await
+        .ok()?;
+    wire_openai::parse_chat_response(
+        &body,
+        started.elapsed().as_millis() as u64,
+        vec![warning.to_string()],
+    )
+    .ok()
 }
 
 fn urlencode(s: &str) -> String {

@@ -9,13 +9,17 @@ use lmhub_modelsdev::ModelsDevClient;
 use lmhub_tui::{PromptFile, TuiContext};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 fn main() -> anyhow::Result<()> {
-    let config_dir = dirs::config_dir()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default().join(".config"))
-        .join("lmhub");
+    let config_dir = std::env::var_os("LMHUB_CONFIG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            dirs::config_dir()
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default().join(".config"))
+                .join("lmhub")
+        });
 
     // Load stored credentials and register them for scrubbing BEFORE the
     // redaction engine initializes, so they can never reach logs/stats.
@@ -40,22 +44,27 @@ async fn run(
     auth_store: Arc<std::sync::Mutex<lmhub_core::AuthStore>>,
 ) -> anyhow::Result<()> {
     let project_dir = std::env::current_dir().context("current directory")?;
-    let output_base = project_dir.join("output");
-    let providers_dir = project_dir.join("providers");
+    let output_base = std::env::var_os("LMHUB_OUTPUT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| project_dir.join("output"));
+    let providers_dir = std::env::var_os("LMHUB_PROVIDERS_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| project_dir.join("providers"));
 
-    let cache_dir = dirs::cache_dir()
-        .unwrap_or_else(|| project_dir.join(".cache"))
-        .join("lmhub");
+    let cache_dir = std::env::var_os("LMHUB_CACHE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            dirs::cache_dir()
+                .unwrap_or_else(|| project_dir.join(".cache"))
+                .join("lmhub")
+        });
     let config_path = config_dir.join("config.toml");
     // A missing config.toml is normal (defaults); a *broken* one is a
     // user error we refuse to paper over with weaker defaults.
     let mut config = match AppConfig::load(&config_path) {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!(
-                "lmhub: no {} — using defaults",
-                config_path.display()
-            );
+            eprintln!("lmhub: no {} — using defaults", config_path.display());
             AppConfig::default()
         }
         Err(e) => {
@@ -108,20 +117,92 @@ async fn run(
 }
 
 /// Structured logs go to a file — the terminal belongs to the TUI.
+///
+/// The file is size-capped (truncated once past 10 MiB on startup) and every
+/// line is scrubbed of registered secrets before it is written, so
+/// `runner.log` never contains API keys/tokens even if a log call bypasses
+/// the redaction-aware sinks.
 fn init_logging(cache_dir: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(cache_dir)?;
+    let log_path = cache_dir.join("runner.log");
+    const MAX_LOG_BYTES: u64 = 10 * 1024 * 1024;
+    if std::fs::metadata(&log_path)
+        .map(|m| m.len() > MAX_LOG_BYTES)
+        .unwrap_or(false)
+    {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&log_path)?;
+    }
     let log_file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(cache_dir.join("runner.log"))?;
+        .open(&log_path)?;
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,hyper=warn,reqwest=warn"));
     tracing_subscriber::fmt()
         .with_env_filter(filter)
-        .with_writer(std::sync::Mutex::new(log_file))
+        .with_writer(ScrubbingMakeWriter {
+            file: Arc::new(Mutex::new(log_file)),
+        })
         .with_ansi(false)
         .init();
     Ok(())
+}
+
+/// Writer factory for the log file; scrubs secrets line-by-line.
+#[derive(Clone)]
+struct ScrubbingMakeWriter {
+    file: Arc<Mutex<std::fs::File>>,
+}
+
+impl<'a> tracing_subscriber::fmt::writer::MakeWriter<'a> for ScrubbingMakeWriter {
+    type Writer = ScrubbingFileWriter;
+    fn make_writer(&'a self) -> Self::Writer {
+        ScrubbingFileWriter {
+            file: Arc::clone(&self.file),
+            pending: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+
+/// Line-buffering file writer that passes complete lines through
+/// `redact::scrub` before writing them to disk.
+struct ScrubbingFileWriter {
+    file: Arc<Mutex<std::fs::File>>,
+    pending: Arc<Mutex<Vec<u8>>>,
+}
+
+impl std::io::Write for ScrubbingFileWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        pending.extend_from_slice(buf);
+        while let Some(pos) = pending.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = pending.drain(..=pos).collect();
+            let scrubbed = lmhub_core::redact::scrub(&String::from_utf8_lossy(&line));
+            self.file
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .write_all(scrubbed.as_bytes())?;
+        }
+        // A single gigantic unterminated line must not grow memory without
+        // bound; flush it scrubbed as-is.
+        if pending.len() > 64 * 1024 {
+            let scrubbed = lmhub_core::redact::scrub(&String::from_utf8_lossy(&pending));
+            self.file
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .write_all(scrubbed.as_bytes())?;
+            pending.clear();
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.lock().unwrap_or_else(|e| e.into_inner()).flush()
+    }
 }
 
 /// Discover prompt files (`*.md`) across directories, later dirs deduped.

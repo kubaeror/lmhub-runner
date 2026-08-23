@@ -52,18 +52,6 @@ pub fn scrub(input: &str) -> String {
     out
 }
 
-/// True when the string looks like a bare API key we should never log.
-pub fn looks_like_secret(input: &str) -> bool {
-    let long_alnum = input.len() >= 20
-        && input
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
-    long_alnum
-        && (input.starts_with("sk-")
-            || input.starts_with("Bearer ")
-            || input.chars().filter(|c| c.is_ascii_digit()).count() > input.len() / 3)
-}
-
 #[cfg(test)]
 mod tests {
     #[test]

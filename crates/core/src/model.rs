@@ -86,8 +86,4 @@ impl ModelCatalog {
             warnings: Vec::new(),
         }
     }
-
-    pub fn is_usable(&self) -> bool {
-        !self.models.is_empty()
-    }
 }

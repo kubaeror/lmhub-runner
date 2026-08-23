@@ -243,43 +243,7 @@ impl Provider for RoutedProvider {
                 self.chat_openai_wire(url, headers, request).await
             }
             ProtocolKind::OpenAiCompatOauthCc => {
-                // SAP AI Core: service-key JSON supplies client credentials +
-                // base URL. Users may alternatively provide a TOML base_url
-                // with a static bearer via env.
-                let raw = std::env::var("AICORE_SERVICE_KEY").map_err(|_| {
-                    CoreError::MissingApiKey(
-                        "sap-ai-core: set AICORE_SERVICE_KEY to the service-key JSON".into(),
-                    )
-                })?;
-                let sk: serde_json::Value = serde_json::from_str(&raw)
-                    .map_err(|e| CoreError::Parse(format!("AICORE_SERVICE_KEY: {e}")))?;
-                let client_id = sk
-                    .get("clientid")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default();
-                let secret = sk
-                    .get("clientsecret")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default();
-                let token_url = sk
-                    .get("token_service_url")
-                    .and_then(|v| v.as_str())
-                    .map(|u| u.trim_end_matches('/').to_string())
-                    .unwrap_or_else(|| {
-                        "https://authentication.eu10.hana.ondemand.com/oauth/token".into()
-                    });
-                let token =
-                    preauth::oauth_client_credentials(client_id, secret, &token_url).await?;
-                let base = self.base_url.clone().or_else(|| {
-                    sk.get("url")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.trim_end_matches('/').to_string())
-                });
-                let base = base.ok_or_else(|| {
-                    CoreError::Other(
-                        "sap-ai-core: service key has no `url`; configure base_url in TOML".into(),
-                    )
-                })?;
+                let (base, token) = self.sap_ai_core_endpoint().await?;
                 let url = format!("{base}/v2/chat/completions");
                 let headers = vec![("authorization".to_string(), format!("Bearer {token}"))];
                 self.chat_openai_wire(url, headers, request).await
@@ -411,12 +375,21 @@ impl RoutedProvider {
         request: &ChatRequest,
     ) -> Result<(String, Vec<(String, String)>)> {
         match self.protocol {
-            ProtocolKind::OpenAiCompat | ProtocolKind::OpenAiCompatOauthCc => {
+            ProtocolKind::OpenAiCompat => {
                 let base = self.base_url.clone().ok_or_else(|| missing_base(self))?;
                 let key = self.key().await?;
                 Ok((
                     format!("{}/chat/completions", base.trim_end_matches('/')),
                     vec![("authorization".to_string(), format!("Bearer {key}"))],
+                ))
+            }
+            ProtocolKind::OpenAiCompatOauthCc => {
+                // Same service-key + client-credentials auth as the
+                // non-streaming path, so streaming actually works for SAP.
+                let (base, token) = self.sap_ai_core_endpoint().await?;
+                Ok((
+                    format!("{base}/v2/chat/completions"),
+                    vec![("authorization".to_string(), format!("Bearer {token}"))],
                 ))
             }
             ProtocolKind::Azure => {
@@ -472,6 +445,44 @@ impl RoutedProvider {
             }
             _ => unreachable!("non-OpenAI protocols never call openai_stream_endpoint"),
         }
+    }
+
+    /// SAP AI Core endpoint resolution shared by chat and chat_stream:
+    /// service-key JSON supplies the client credentials and base URL.
+    /// A TOML `base_url` may substitute for the service key's `url`.
+    async fn sap_ai_core_endpoint(&self) -> Result<(String, String)> {
+        let raw = std::env::var("AICORE_SERVICE_KEY").map_err(|_| {
+            CoreError::MissingApiKey(
+                "sap-ai-core: set AICORE_SERVICE_KEY to the service-key JSON".into(),
+            )
+        })?;
+        let sk: serde_json::Value = serde_json::from_str(&raw)
+            .map_err(|e| CoreError::Parse(format!("AICORE_SERVICE_KEY: {e}")))?;
+        let client_id = sk
+            .get("clientid")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let secret = sk
+            .get("clientsecret")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let token_url = sk
+            .get("token_service_url")
+            .and_then(|v| v.as_str())
+            .map(|u| u.trim_end_matches('/').to_string())
+            .unwrap_or_else(|| "https://authentication.eu10.hana.ondemand.com/oauth/token".into());
+        let token = preauth::oauth_client_credentials(client_id, secret, &token_url).await?;
+        let base = self.base_url.clone().or_else(|| {
+            sk.get("url")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim_end_matches('/').to_string())
+        });
+        let base = base.ok_or_else(|| {
+            CoreError::Other(
+                "sap-ai-core: service key has no `url`; configure base_url in TOML".into(),
+            )
+        })?;
+        Ok((base, token))
     }
 }
 

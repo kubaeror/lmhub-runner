@@ -13,7 +13,6 @@ members = [
 [workspace.package]
 edition = "2021"
 license = "MIT"
-repository = "https://example.com/lmhub-runner"
 
 [workspace.dependencies]
 lmhub-core = { path = "crates/core" }

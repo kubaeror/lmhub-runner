@@ -27,13 +27,16 @@ const TOKEN_SKEW_SECS: i64 = 120;
 static TOKEN_CACHE: Mutex<Option<(String, i64)>> = Mutex::new(None);
 
 pub fn resolve_project() -> Result<String> {
-    std::env::var("GOOGLE_CLOUD_PROJECT")
+    std::env::var("GOOGLE_VERTEX_PROJECT")
         .or_else(|_| std::env::var("VERTEX_PROJECT"))
-        .map_err(|_| CoreError::Other("vertex: set GOOGLE_CLOUD_PROJECT (project id)".into()))
+        .or_else(|_| std::env::var("GOOGLE_CLOUD_PROJECT"))
+        .map_err(|_| CoreError::Other("vertex: set GOOGLE_VERTEX_PROJECT (project id)".into()))
 }
 
 pub fn resolve_location() -> String {
-    std::env::var("VERTEX_LOCATION").unwrap_or_else(|_| "global".into())
+    std::env::var("GOOGLE_VERTEX_LOCATION")
+        .or_else(|_| std::env::var("VERTEX_LOCATION"))
+        .unwrap_or_else(|_| "global".into())
 }
 
 fn gemini_stream_url(project: &str, location: &str, model: &str) -> String {

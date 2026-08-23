@@ -33,7 +33,7 @@ jobs:
         run: cargo install cross --locked
 
       - name: Build
-        working-directory: ${{ !matrix.cross && '.' || '.' }}
+        working-directory: .
         run: |
           if [ "${{ matrix.cross }}" = "true" ]; then
             cross build --release --locked --target ${{ matrix.target }}

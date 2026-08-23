@@ -16,6 +16,9 @@ pub struct EventSink {
     ui_tx: Option<UnboundedSender<RunEvent>>,
     error_count: AtomicU32,
     warning_count: AtomicU32,
+    /// Set when a persistence write fails; `finalize` surfaces it instead of
+    /// silently dropping events (disk full, broken pipe, …).
+    write_failed: AtomicU32,
 }
 
 impl EventSink {
@@ -45,6 +48,7 @@ impl EventSink {
             ui_tx,
             error_count: AtomicU32::new(0),
             warning_count: AtomicU32::new(0),
+            write_failed: AtomicU32::new(0),
         })
     }
 
@@ -58,20 +62,40 @@ impl EventSink {
 
     /// Record + forward a generic event (no error bookkeeping).
     pub fn emit(&self, event: &RunEvent) {
-        if let Ok(mut f) = self.events_file.lock() {
-            if let Ok(line) = serde_json::to_string(event) {
-                let _ = writeln!(f, "{line}");
-            }
-        }
+        self.write_line(&self.events_file, event);
         if let Some(tx) = &self.ui_tx {
             let _ = tx.send(event.clone());
         }
     }
 
+    /// Serialize + append one line; failures are flagged for `finalize`
+    /// instead of being swallowed silently.
+    fn write_line(&self, file: &Mutex<std::io::BufWriter<std::fs::File>>, event: &RunEvent) {
+        let Ok(mut f) = file.lock() else {
+            self.note_write_failure("sink mutex poisoned");
+            return;
+        };
+        let Ok(line) = serde_json::to_string(event) else {
+            return; // RunEvent is always serializable
+        };
+        if let Err(e) = writeln!(f, "{line}") {
+            self.note_write_failure(&e.to_string());
+        }
+    }
+
+    fn note_write_failure(&self, detail: &str) {
+        self.write_failed.fetch_add(1, Ordering::Relaxed);
+        tracing::error!(detail, "run event persistence failed; events may be lost");
+    }
+
     fn log_error_line(&self, ts: &str, kind: &str, message: &str) {
         if let Ok(mut f) = self.errors_file.lock() {
             let one_line = message.replace(['\n', '\r'], " ");
-            let _ = writeln!(f, "{ts}\t{kind}\t{one_line}");
+            if let Err(e) = writeln!(f, "{ts}\t{kind}\t{one_line}") {
+                self.note_write_failure(&e.to_string());
+            }
+        } else {
+            self.note_write_failure("errors.log mutex poisoned");
         }
         tracing::warn!(kind, message = %redact::scrub(message), "run error");
     }
@@ -127,15 +151,24 @@ impl EventSink {
     }
 
     /// Flush and close both files; must be called before statistics.json is
-    /// written so counts and logs are consistent on disk.
+    /// written so counts and logs are consistent on disk. Fails loudly when
+    /// any event could not be persisted.
     pub fn finalize(self) -> std::io::Result<()> {
-        {
-            let mut f = self.events_file.lock().unwrap();
-            f.flush()?;
+        let mut failed = self.write_failed.load(Ordering::Relaxed) > 0;
+        for f in [&self.events_file, &self.errors_file] {
+            let Ok(mut f) = f.lock() else {
+                failed = true;
+                continue;
+            };
+            if let Err(e) = f.flush() {
+                failed = true;
+                tracing::error!(error = %e, "run event flush failed");
+            }
         }
-        {
-            let mut f = self.errors_file.lock().unwrap();
-            f.flush()?;
+        if failed {
+            return Err(std::io::Error::other(
+                "some run events could not be persisted (disk full?)",
+            ));
         }
         // Files close on drop of the BufWriters inside the mutexes.
         Ok(())
