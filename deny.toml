@@ -1,0 +1,32 @@
+# cargo-deny policy — run locally with: cargo deny check licenses bans sources
+# (CI runs the same command in the `deny` job).
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "ISC",
+    "MPL-2.0",
+    "Zlib",
+    "Unlicense",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+# Duplicate versions are warned (not denied) so transient split-version
+# deps (syn 1/2, rustix, …) don't block CI; clean them up as they arise.
+multiple-versions = "warn"
+# Crates banned outright, regardless of version.
+deny = [
+    # Assembly/SIMD crates by the same author as `ring` — historically
+    # pulled in only to fix ring build issues; prefer the normal builds.
+    # (placeholder policy — extend as real bans are identified)
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = []
