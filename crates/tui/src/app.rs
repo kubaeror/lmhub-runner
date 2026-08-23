@@ -302,8 +302,14 @@ impl App {
 
     pub fn visible_reasoning_levels(&self) -> Vec<ReasoningLevel> {
         match self.selected_model() {
-            Some(m) if m.capabilities.reasoning => ReasoningLevel::ALL.to_vec(),
-            Some(_) => vec![ReasoningLevel::Off],
+            Some(m) if !m.capabilities.reasoning => vec![ReasoningLevel::Off],
+            // Models.dev `reasoning_options` declaration wins when present;
+            // empty declarations are treated as unknown → all levels.
+            Some(m) => match &m.capabilities.reasoning_levels {
+                Some(levels) if levels.is_empty() => vec![ReasoningLevel::Off],
+                Some(levels) => levels.clone(),
+                None => ReasoningLevel::ALL.to_vec(),
+            },
             None => vec![ReasoningLevel::Off],
         }
     }

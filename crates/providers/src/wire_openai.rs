@@ -253,6 +253,24 @@ mod tests {
     }
 
     #[test]
+    fn passes_extended_effort_levels_through() {
+        for level in [
+            ReasoningLevel::Minimal,
+            ReasoningLevel::XHigh,
+            ReasoningLevel::Max,
+        ] {
+            let req = sample_request(level);
+            let p = build_chat_payload(
+                &req,
+                OpenAiWireOpts {
+                    include_reasoning_effort: true,
+                },
+            );
+            assert_eq!(p["reasoning_effort"], json!(level.as_str()));
+        }
+    }
+
+    #[test]
     fn parses_usage_with_cache_and_reasoning_details() {
         let body = json!({
             "choices": [{"finish_reason": "tool_calls", "message": {

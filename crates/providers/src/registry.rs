@@ -82,6 +82,7 @@ pub fn build_registry(
                     tool_call: true,
                     context_window: Some(200_000),
                     max_output: Some(8_192),
+                    reasoning_levels: None,
                 });
             }
         }
@@ -123,6 +124,7 @@ fn local_to_info(lm: &LocalModel) -> ModelInfo {
             tool_call: lm.tool_call,
             reasoning: lm.reasoning,
             prompt_caching: false, // unknown until Models.dev says otherwise
+            reasoning_levels: lm.parsed_reasoning_levels(),
         },
     }
 }
@@ -148,6 +150,7 @@ pub fn entry_to_info(entry: &ModelEntry) -> ModelInfo {
                 .as_ref()
                 .map(|c| c.cache_read.is_some())
                 .unwrap_or(false),
+            reasoning_levels: entry.reasoning_levels(),
         },
     }
 }

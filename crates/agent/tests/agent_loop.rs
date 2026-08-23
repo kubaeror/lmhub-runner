@@ -101,6 +101,7 @@ fn spec(base: &std::path::Path, provider: Arc<dyn Provider>) -> RunSpec {
                 tool_call: true,
                 reasoning: true,
                 prompt_caching: true,
+                reasoning_levels: None,
             },
         },
         family_override: None,

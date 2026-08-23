@@ -36,6 +36,9 @@ id = "model-a"
 name = "Model A"
 family = "GLM"
 reasoning = true
+# Optional: which reasoning levels this model actually supports
+# (off/minimal/low/medium/high/xhigh/max). Omit to offer all levels.
+reasoning_levels = ["off", "low", "high"]
 tool_call = true
 context_window = 128000
 max_output = 8192

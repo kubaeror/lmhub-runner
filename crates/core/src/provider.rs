@@ -1,4 +1,4 @@
-use crate::chat::{ChatRequest, ChatResponse};
+use crate::chat::{ChatRequest, ChatResponse, ReasoningLevel};
 use crate::error::Result;
 use crate::model::{Capabilities, ModelListSource};
 use async_trait::async_trait;
@@ -22,6 +22,7 @@ impl From<ProviderCaps> for Capabilities {
             tool_call: c.tool_calls,
             reasoning: c.reasoning,
             prompt_caching: c.prompt_caching,
+            reasoning_levels: None,
         }
     }
 }
@@ -37,6 +38,25 @@ pub struct LocalModel {
     pub tool_call: bool,
     pub context_window: Option<u64>,
     pub max_output: Option<u64>,
+    /// Declared supported reasoning levels (e.g. `["off", "high"]`); empty/
+    /// absent means "no declaration — all levels offered".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_levels: Option<Vec<String>>,
+}
+
+impl LocalModel {
+    /// Parse the raw TOML strings into `ReasoningLevel`s (unknown names are
+    /// dropped; an all-invalid list yields `Some(vec![])`).
+    pub fn parsed_reasoning_levels(&self) -> Option<Vec<ReasoningLevel>> {
+        self.reasoning_levels.as_ref().map(|raw| {
+            let mut levels: Vec<ReasoningLevel> = raw
+                .iter()
+                .filter_map(|s| ReasoningLevel::parse_effort(s))
+                .collect();
+            levels.dedup();
+            levels
+        })
+    }
 }
 
 /// Modular provider adapter. Implement this trait to add a new provider

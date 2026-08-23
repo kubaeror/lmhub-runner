@@ -20,9 +20,11 @@ use std::time::Instant;
 pub fn thinking_budget(level: ReasoningLevel) -> Option<i64> {
     match level {
         ReasoningLevel::Off => None,
-        ReasoningLevel::Low => Some(1_024),
+        // Gemini's thinkingBudget floor is 1024; the API's ceiling (24576)
+        // is shared by the strongest levels.
+        ReasoningLevel::Minimal | ReasoningLevel::Low => Some(1_024),
         ReasoningLevel::Medium => Some(8_192),
-        ReasoningLevel::High => Some(24_576),
+        ReasoningLevel::High | ReasoningLevel::XHigh | ReasoningLevel::Max => Some(24_576),
     }
 }
 

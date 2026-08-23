@@ -3,31 +3,72 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt;
 
-/// Selected reasoning effort for a run (`off/low/medium/high`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Selected reasoning effort for a run. Ordered weakest → strongest.
+/// Mirrors the levels models.dev declares in `reasoning_options` (the same
+/// source opencode uses): `off/minimal/low/medium/high/xhigh/max`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningLevel {
     Off,
+    Minimal,
     Low,
     Medium,
     High,
+    XHigh,
+    Max,
 }
 
 impl ReasoningLevel {
-    pub const ALL: [ReasoningLevel; 4] = [
+    pub const ALL: [ReasoningLevel; 7] = [
         ReasoningLevel::Off,
+        ReasoningLevel::Minimal,
         ReasoningLevel::Low,
         ReasoningLevel::Medium,
         ReasoningLevel::High,
+        ReasoningLevel::XHigh,
+        ReasoningLevel::Max,
     ];
 
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Off => "off",
+            Self::Minimal => "minimal",
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
         }
+    }
+
+    /// Parse a models.dev `reasoning_options` effort value (or TOML string).
+    pub fn parse_effort(s: &str) -> Option<Self> {
+        Some(match s.trim().to_ascii_lowercase().as_str() {
+            "off" | "none" => Self::Off,
+            "minimal" => Self::Minimal,
+            "low" => Self::Low,
+            "medium" => Self::Medium,
+            "high" => Self::High,
+            "xhigh" | "x-high" => Self::XHigh,
+            "max" | "maximum" => Self::Max,
+            _ => return None,
+        })
+    }
+
+    /// Clamp to the closest supported level: the smallest allowed level at
+    /// or above `self`, or the largest allowed one when none exists.
+    /// `allowed = None` means "no declared limit" → unchanged.
+    pub fn clamp_to(self, allowed: Option<&[ReasoningLevel]>) -> ReasoningLevel {
+        let Some(allowed) = allowed else {
+            return self;
+        };
+        if allowed.contains(&self) {
+            return self;
+        }
+        if let Some(next) = allowed.iter().copied().find(|l| *l > self) {
+            return next;
+        }
+        allowed.iter().copied().max().unwrap_or(ReasoningLevel::Off)
     }
 }
 
@@ -243,6 +284,79 @@ impl ChatRequest {
         Box::pin(futures::stream::once(async move {
             Ok(ChatStreamItem::Completed(response))
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clamp_keeps_supported_levels() {
+        let allowed = [
+            ReasoningLevel::Off,
+            ReasoningLevel::High,
+            ReasoningLevel::Max,
+        ];
+        assert_eq!(
+            ReasoningLevel::Off.clamp_to(Some(&allowed)),
+            ReasoningLevel::Off
+        );
+        assert_eq!(
+            ReasoningLevel::High.clamp_to(Some(&allowed)),
+            ReasoningLevel::High
+        );
+        assert_eq!(
+            ReasoningLevel::Max.clamp_to(Some(&allowed)),
+            ReasoningLevel::Max
+        );
+    }
+
+    #[test]
+    fn clamp_raises_to_next_supported_level() {
+        // Model supports only high/max (e.g. deepseek-v4-flash): off/low/medium
+        // all clamp up to high.
+        let allowed = [ReasoningLevel::High, ReasoningLevel::Max];
+        assert_eq!(
+            ReasoningLevel::Off.clamp_to(Some(&allowed)),
+            ReasoningLevel::High
+        );
+        assert_eq!(
+            ReasoningLevel::Medium.clamp_to(Some(&allowed)),
+            ReasoningLevel::High
+        );
+    }
+
+    #[test]
+    fn clamp_lowers_over_requests() {
+        // Model caps at high (e.g. mistral-small-4: none/high): max → high.
+        let allowed = [ReasoningLevel::Off, ReasoningLevel::High];
+        assert_eq!(
+            ReasoningLevel::Max.clamp_to(Some(&allowed)),
+            ReasoningLevel::High
+        );
+    }
+
+    #[test]
+    fn clamp_ignores_unknown_declarations() {
+        assert_eq!(ReasoningLevel::High.clamp_to(None), ReasoningLevel::High);
+    }
+
+    #[test]
+    fn parses_catalog_effort_names() {
+        assert_eq!(
+            ReasoningLevel::parse_effort("none"),
+            Some(ReasoningLevel::Off)
+        );
+        assert_eq!(
+            ReasoningLevel::parse_effort("xhigh"),
+            Some(ReasoningLevel::XHigh)
+        );
+        assert_eq!(
+            ReasoningLevel::parse_effort("max"),
+            Some(ReasoningLevel::Max)
+        );
+        assert_eq!(ReasoningLevel::parse_effort("turbo"), None);
     }
 }
 

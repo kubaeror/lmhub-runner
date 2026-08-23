@@ -109,6 +109,18 @@ SSE support (Bedrock, Cohere) transparently fall back to non-streaming —
 `statistics.json`, `events.jsonl` and the tool protocol are identical in both
 modes (streaming deltas are UI-only and never persisted).
 
+### Reasoning levels
+
+Models declare their supported reasoning levels via models.dev
+`reasoning_options` (the same source opencode uses) — from a plain on/off
+toggle up to explicit effort levels. The TUI only offers the levels a model
+actually supports (`off / minimal / low / medium / high / xhigh / max`), and
+the agent clamps the requested level before sending anything, logging a
+warning when it had to adjust. Models with no declaration get all levels;
+custom TOML models can pin theirs with `reasoning_levels = ["off", "high"]`.
+Providers that reject a level at request time degrade once (without
+reasoning) exactly as before.
+
 Transient failures (429/5xx/connect/timeouts) retry automatically:
 **6 attempts**, exponential backoff 0.5 s → 30 s cap with jitter, honoring
 `Retry-After`. Retries never apply once stream bytes started flowing.

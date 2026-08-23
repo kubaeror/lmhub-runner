@@ -27,9 +27,12 @@ pub struct AnthropicWireOpts {
 pub fn thinking_budget(level: ReasoningLevel) -> Option<u32> {
     match level {
         ReasoningLevel::Off => None,
+        ReasoningLevel::Minimal => Some(1_024),
         ReasoningLevel::Low => Some(2_048),
         ReasoningLevel::Medium => Some(8_192),
         ReasoningLevel::High => Some(16_384),
+        ReasoningLevel::XHigh => Some(24_576),
+        ReasoningLevel::Max => Some(32_000),
     }
 }
 

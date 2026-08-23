@@ -65,7 +65,13 @@ pub async fn execute(
         Some(f) if !f.is_empty() => f.to_string(),
         _ => infer_family(&spec.model.id, spec.model.family.as_ref()),
     };
-    let reasoning_str = spec.reasoning.to_string();
+    // Models declare their supported reasoning levels (models.dev
+    // `reasoning_options`); clamp before anything is built or named so an
+    // unsupported level is never sent upstream.
+    let requested_reasoning = spec.reasoning;
+    let reasoning =
+        requested_reasoning.clamp_to(spec.model.capabilities.reasoning_levels.as_deref());
+    let reasoning_str = reasoning.to_string();
 
     // Every run gets its own directory so reruns never clobber artifacts or
     // reuse a dirty workspace: output/{family}/{model}/{reasoning}/{start}-{id8}/
@@ -81,6 +87,13 @@ pub async fn execute(
 
     std::fs::create_dir_all(&workspace_dir)?;
     let sink = EventSink::create(&run_dir, ui_tx)?;
+
+    if reasoning != requested_reasoning {
+        sink.warning(&format!(
+            "reasoning level {requested_reasoning} not supported by model {} — using {reasoning}",
+            spec.model.id
+        ));
+    }
 
     let identity = RunIdentity {
         provider: spec.provider.id().to_string(),
@@ -109,7 +122,7 @@ pub async fn execute(
 
     // ---- agent loop with cancel/deadline/panic guards ---------------------
     let loop_result =
-        AssertUnwindSafe(run_loop(&spec, &sink, &mut metrics, &tool_rt)).catch_unwind();
+        AssertUnwindSafe(run_loop(&spec, &sink, &mut metrics, &tool_rt, reasoning)).catch_unwind();
 
     let exit: Result<Result<LoopExit, CoreError>, String> = tokio::select! {
         biased;
@@ -203,6 +216,7 @@ async fn run_loop(
     sink: &EventSink,
     metrics: &mut RunMetrics,
     tool_rt: &ToolRuntime,
+    reasoning: ReasoningLevel,
 ) -> Result<LoopExit, CoreError> {
     let mut messages: Vec<ChatMessage> = vec![ChatMessage::user(spec.task.clone())];
 
@@ -215,7 +229,7 @@ async fn run_loop(
         let request = ChatRequest::new(spec.model.id.clone(), spec.system_prompt.clone())
             .with_tools(tool_specs())
             .with_messages(messages.clone())
-            .with_reasoning(spec.reasoning)
+            .with_reasoning(reasoning)
             .with_max_tokens(spec.max_output_tokens)
             .with_prompt_cache(spec.enable_prompt_cache);
 
