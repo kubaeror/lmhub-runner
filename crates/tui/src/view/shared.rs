@@ -92,6 +92,9 @@ pub fn hints(state: &State) -> &'static str {
             "[/] session  ↑/↓ scroll  c cancel  C all  R rerun  v raw feed  Enter detail  : palette  q quit"
         }
         crate::action::Screen::History => "↑/↓ select  Enter detail  F5 rescan  : palette  q quit",
+        crate::action::Screen::Reasoning => {
+            "type=filter  ↑/↓ select  D cycle default (★)  Esc clear  F5 reload  : palette  q quit"
+        }
     }
 }
 

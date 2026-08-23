@@ -17,6 +17,7 @@ mod history;
 mod keymap;
 mod pricing;
 mod provider_search;
+mod reasoning_map;
 mod reduce;
 mod state;
 mod transcript;
@@ -65,6 +66,8 @@ pub enum UiMsg {
         run_id: u64,
         result: Result<Box<lmhub_agent::RunOutcome>, String>,
     },
+    /// Full Models.dev snapshot for the reasoning map.
+    SnapshotLoaded(Arc<lmhub_modelsdev::CatalogSnapshot>),
     /// Transient status line (connect flows etc.).
     Notice(String),
 }
@@ -274,6 +277,22 @@ fn run_effects(state: &mut State, effects: Vec<Effect>) {
                     .history
                     .idx
                     .min(state.history.rows.len().saturating_sub(1));
+            }
+            Effect::LoadSnapshot => {
+                let mdc = Arc::clone(&state.modelsdev);
+                let tx = state.ui_tx.clone();
+                tokio::spawn(async move {
+                    match mdc.load().await {
+                        Ok(snapshot) => {
+                            let _ = tx.send(UiMsg::SnapshotLoaded(Arc::new(snapshot)));
+                        }
+                        Err(e) => {
+                            let _ = tx.send(UiMsg::Notice(format!(
+                                "models.dev catalog unavailable: {e}"
+                            )));
+                        }
+                    }
+                });
             }
             Effect::SavePrefs => state.prefs.save(&state.prefs_path),
         }

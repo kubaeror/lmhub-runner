@@ -12,7 +12,7 @@ use lmhub_core::{
 use lmhub_modelsdev::CatalogSnapshot;
 use lmhub_providers::ProviderRegistry;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -206,6 +206,9 @@ pub struct SessionPrefs {
     pub last_task: Option<String>,
     #[serde(skip_serializing_if = "BTreeSet::is_empty")]
     pub favorites: BTreeSet<String>,
+    /// Per-model default reasoning level (model id → level).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_defaults: std::collections::BTreeMap<String, ReasoningLevel>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub task_history: Vec<String>,
     pub max_concurrent_runs: usize,
@@ -245,6 +248,13 @@ pub struct HistoryState {
     pub idx: usize,
 }
 
+/// State of the reasoning-map screen (all models across providers).
+#[derive(Default)]
+pub struct MapState {
+    pub filter: String,
+    pub idx: usize,
+}
+
 pub struct State {
     // ---- dependencies (immutable after startup) --------------------------
     pub registry: ProviderRegistry,
@@ -271,6 +281,9 @@ pub struct State {
     pub setup: SetupState,
     pub runs: RunRegistry,
     pub history: HistoryState,
+    pub map: MapState,
+    /// Full Models.dev snapshot for the reasoning map (lazy-loaded).
+    pub snapshot_all: Option<Arc<CatalogSnapshot>>,
     pub layout: LayoutCache,
     /// Provider id of the in-flight model fetch (stale-response guard).
     pub requested_models_for: Option<String>,
@@ -329,6 +342,8 @@ impl State {
                 next_id: 1,
             },
             history: HistoryState::default(),
+            map: MapState::default(),
+            snapshot_all: None,
             layout: LayoutCache::default(),
             requested_models_for: None,
         };
@@ -442,6 +457,48 @@ impl State {
             .unwrap_or(ReasoningLevel::Off)
     }
 
+    /// Snap the reasoning selection to the model's persisted default (when
+    /// one exists and the model supports it).
+    pub fn snap_reasoning_to_default(&mut self) {
+        let Some(model) = self.selected_model() else {
+            return;
+        };
+        let Some(level) = self.prefs.model_defaults.get(&model.id).copied() else {
+            return;
+        };
+        let levels = self.visible_reasoning_levels();
+        if let Some(idx) = levels.iter().position(|l| *l == level) {
+            self.setup.reasoning_idx = idx;
+        }
+    }
+
+    /// The default reasoning for a model, when set. `None` = model default
+    /// or "whatever the current selection says".
+    pub fn default_reasoning_for(&self, model_id: &str) -> Option<ReasoningLevel> {
+        self.prefs.model_defaults.get(model_id).copied()
+    }
+
+    /// Selected model row in the reasoning map (filter-aware).
+    pub fn selected_map_model(&self) -> Option<crate::reasoning_map::MapModel> {
+        let snapshot = self.snapshot_all.as_ref()?;
+        let rows = crate::reasoning_map::filtered(
+            &crate::reasoning_map::all_models(snapshot, &self.setup.catalog_cache),
+            &self.map.filter,
+        );
+        rows.get(self.map.idx).cloned()
+    }
+
+    /// All reasoning-map rows after applying the current filter.
+    pub fn map_rows(&self) -> Vec<crate::reasoning_map::MapModel> {
+        let Some(snapshot) = &self.snapshot_all else {
+            return Vec::new();
+        };
+        crate::reasoning_map::filtered(
+            &crate::reasoning_map::all_models(snapshot, &self.setup.catalog_cache),
+            &self.map.filter,
+        )
+    }
+
     pub fn selected_pricing(&self) -> Option<PricingContext> {
         let snapshot = self.setup.snapshot.as_ref()?;
         let provider = self.selected_provider()?;
@@ -491,6 +548,7 @@ impl State {
         self.setup.models_loading = false;
         self.setup.model_idx = 0;
         self.setup.reasoning_idx = 0;
+        self.snap_reasoning_to_default();
     }
 
     /// Select the provider at a non-header row index; loads models unless

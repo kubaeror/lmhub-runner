@@ -54,6 +54,9 @@ impl State {
                 if screen == Screen::History && self.history.rows.is_empty() {
                     effects.push(Effect::ScanHistory);
                 }
+                if screen == Screen::Reasoning && self.snapshot_all.is_none() {
+                    effects.push(Effect::LoadSnapshot);
+                }
                 if screen == Screen::Run {
                     self.runs.selected = self
                         .runs
@@ -296,6 +299,31 @@ impl State {
                 Vec::new()
             }
 
+            // ---- reasoning map -------------------------------------
+            Action::MapFilter(text) => {
+                self.map.filter = text;
+                self.map.idx = self.map.idx.min(self.map_rows().len().saturating_sub(1));
+                Vec::new()
+            }
+            Action::MapClear => {
+                self.map.filter.clear();
+                self.map.idx = 0;
+                Vec::new()
+            }
+            Action::MapMove(delta) => {
+                let len = self.map_rows().len();
+                if len > 0 {
+                    self.map.idx = ((self.map.idx as i32 + delta).max(0) as usize).min(len - 1);
+                }
+                Vec::new()
+            }
+            Action::CycleModelDefault => self.cycle_model_default(),
+            Action::SetModelDefault => self.set_model_default(),
+            Action::ReloadSnapshot => {
+                self.snapshot_all = None;
+                vec![Effect::LoadSnapshot]
+            }
+
             // ---- palette ---------------------------------------------------
             Action::PaletteChar(c) => {
                 if c.is_control() {
@@ -402,6 +430,7 @@ impl State {
                             self.adopt_catalog(&cache);
                         }
                         self.restore_last_model();
+                        self.snap_reasoning_to_default();
                     }
                 }
                 Vec::new()
@@ -433,6 +462,11 @@ impl State {
                 }
                 // A slot freed up: promote queued runs.
                 self.promote_pending()
+            }
+            crate::UiMsg::SnapshotLoaded(snapshot) => {
+                self.snapshot_all = Some(snapshot);
+                self.map.idx = self.map.idx.min(self.map_rows().len().saturating_sub(1));
+                Vec::new()
             }
             crate::UiMsg::Notice(msg) => {
                 self.push_notice(msg);
@@ -507,7 +541,6 @@ impl State {
         }
         self.select_provider(next)
     }
-
     fn move_model(&mut self, delta: i32) -> Vec<Effect> {
         let len = self.setup.models.len();
         if len == 0 {
@@ -515,6 +548,7 @@ impl State {
         }
         self.setup.model_idx = ((self.setup.model_idx as i32 + delta).max(0) as usize).min(len - 1);
         self.setup.reasoning_idx = 0;
+        self.snap_reasoning_to_default();
         Vec::new()
     }
 
@@ -658,6 +692,51 @@ impl State {
         vec![Effect::SavePrefs]
     }
 
+    /// `d` in the Setup Reasoning pane: pin the current level as the
+    /// current model's default (persisted, used on future selections).
+    fn set_model_default(&mut self) -> Vec<Effect> {
+        let Some(model_id) = self.selected_model().map(|m| m.id.clone()) else {
+            self.push_notice("select a model first");
+            return Vec::new();
+        };
+        let level = self.selected_reasoning();
+        self.prefs.model_defaults.insert(model_id.clone(), level);
+        self.push_notice(format!(
+            "default reasoning for {} → {}",
+            model_id,
+            level.as_str()
+        ));
+        vec![Effect::SavePrefs]
+    }
+
+    /// `d` in the Reasoning map: cycle the selected model's default
+    /// through its supported levels (wrapping).
+    fn cycle_model_default(&mut self) -> Vec<Effect> {
+        let Some(model) = self.selected_map_model() else {
+            self.push_notice("no snapshot loaded — open the Reasoning tab first");
+            return Vec::new();
+        };
+        let levels = crate::reasoning_map::effective_levels(&model);
+        if levels.len() <= 1 {
+            self.push_notice(format!("{} has no reasoning levels", model.model_id));
+            return Vec::new();
+        }
+        let current = self.prefs.model_defaults.get(&model.model_id).copied();
+        let next = match current.and_then(|c| levels.iter().position(|l| *l == c)) {
+            Some(idx) => levels[(idx + 1) % levels.len()],
+            None => levels[1], // first real level (skip "off")
+        };
+        self.prefs
+            .model_defaults
+            .insert(model.model_id.clone(), next);
+        self.push_notice(format!(
+            "default reasoning for {} → {}",
+            model.model_id,
+            next.as_str()
+        ));
+        vec![Effect::SavePrefs]
+    }
+
     fn start_run(&mut self) -> Vec<Effect> {
         let provider = match self.selected_provider() {
             Some(p) => p,
@@ -719,7 +798,7 @@ impl State {
             return Vec::new();
         }
         let system_prompt = self.system_prompt_for(self.setup.prompt_idx);
-        let reasoning = self.selected_reasoning();
+        let fallback = self.selected_reasoning();
         let task = self.setup.task_input.trim().to_string();
         let mut effects = Vec::new();
         for spec in specs {
@@ -727,6 +806,12 @@ impl State {
                 Some(p) => p,
                 None => continue,
             };
+            // Per-model default reasoning when set, clamped to the model's
+            // supported levels; otherwise the current selection.
+            let reasoning = self
+                .default_reasoning_for(&spec.model_id)
+                .unwrap_or(fallback)
+                .clamp_to(spec.model.capabilities.reasoning_levels.as_deref());
             effects.extend(self.launch_session(
                 provider,
                 spec.model,
@@ -1119,5 +1204,123 @@ mod tests {
         assert_eq!(s.focus, Pane::Providers);
         assert_eq!(s.provider_idx, 0);
         assert!(s.bulk.is_empty());
+    }
+
+    #[test]
+    fn model_default_reasoning_snaps_on_selection() {
+        let (mut state, _dir) = test_state();
+        // Two models with distinct reasoning sets.
+        let m1 = lmhub_core::ModelInfo {
+            id: "claude-3-7-sonnet".into(),
+            capabilities: lmhub_core::Capabilities {
+                reasoning: true,
+                reasoning_levels: Some(vec![
+                    lmhub_core::ReasoningLevel::Off,
+                    lmhub_core::ReasoningLevel::Low,
+                    lmhub_core::ReasoningLevel::High,
+                ]),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        state.setup.models = vec![m1.clone()];
+        state.setup.model_idx = 0;
+        state.setup.reasoning_idx = 0;
+        // Pin high as the default.
+        state.setup.reasoning_idx = 2;
+        let effects = state.reduce(Action::SetModelDefault);
+        assert_eq!(
+            state.prefs.model_defaults.get("claude-3-7-sonnet"),
+            Some(&lmhub_core::ReasoningLevel::High)
+        );
+        assert!(effects.iter().any(|e| matches!(e, Effect::SavePrefs)));
+        // Moving away and back snaps to the default.
+        state.setup.reasoning_idx = 0;
+        state.snap_reasoning_to_default();
+        assert_eq!(state.setup.reasoning_idx, 2);
+        let _ = m1;
+    }
+
+    #[test]
+    fn map_cycle_default_wraps_through_supported_levels() {
+        let (mut state, _dir) = test_state();
+        state.snapshot_all = Some(std::sync::Arc::new(lmhub_modelsdev::CatalogSnapshot {
+            catalog: lmhub_modelsdev::catalog::Catalog {
+                providers: std::collections::BTreeMap::from([(
+                    "anthropic".into(),
+                    lmhub_modelsdev::catalog::ProviderEntry {
+                        id: "anthropic".into(),
+                        name: "Anthropic".into(),
+                        env: vec![],
+                        api: None,
+                        doc: None,
+                        npm: None,
+                        models: std::collections::BTreeMap::from([(
+                            "claude-3-7-sonnet".into(),
+                            serde_json::from_value(serde_json::json!({
+                                "id": "claude-3-7-sonnet",
+                                "reasoning": true,
+                                "reasoning_options": [{ "type": "effort", "values": ["off", "low", "high"] }],
+                            }))
+                            .unwrap(),
+                        )]),
+                    },
+                )]),
+            },
+            fetched_at: "t".into(),
+            version: "v".into(),
+            stale: false,
+        }));
+        state.map.idx = 0;
+        // First d: skip off → low.
+        state.reduce(Action::CycleModelDefault);
+        assert_eq!(
+            state.prefs.model_defaults.get("claude-3-7-sonnet"),
+            Some(&lmhub_core::ReasoningLevel::Low)
+        );
+        // Second d: high; third d: wraps through off → off.
+        state.reduce(Action::CycleModelDefault);
+        assert_eq!(
+            state.prefs.model_defaults.get("claude-3-7-sonnet"),
+            Some(&lmhub_core::ReasoningLevel::High)
+        );
+        state.reduce(Action::CycleModelDefault);
+        assert_eq!(
+            state.prefs.model_defaults.get("claude-3-7-sonnet"),
+            Some(&lmhub_core::ReasoningLevel::Off)
+        );
+        // And one more lands on low again.
+        state.reduce(Action::CycleModelDefault);
+        assert_eq!(
+            state.prefs.model_defaults.get("claude-3-7-sonnet"),
+            Some(&lmhub_core::ReasoningLevel::Low)
+        );
+    }
+
+    #[test]
+    fn bulk_uses_per_model_default_reasoning() {
+        let (mut state, _dir) = test_state();
+        seed_catalog(&mut state, "openai", &["gpt-4o", "gpt-4o-mini"]);
+        state.setup.models = vec![model("gpt-4o"), model("gpt-4o-mini")];
+        state.setup.task_input = "build a thing".into();
+        state
+            .prefs
+            .model_defaults
+            .insert("gpt-4o-mini".into(), lmhub_core::ReasoningLevel::Low);
+        state.setup.bulk = std::collections::BTreeSet::from([
+            ("openai".into(), "gpt-4o".into()),
+            ("openai".into(), "gpt-4o-mini".into()),
+        ]);
+        state.reduce(Action::BulkStart);
+        state.reduce(Action::ConfirmBulkStart);
+        let by_model: std::collections::BTreeMap<String, String> = state
+            .runs
+            .runs
+            .iter()
+            .map(|r| (r.model_id.clone(), r.reasoning.clone()))
+            .collect();
+        // No default → current selection (off); default set → low.
+        assert_eq!(by_model["gpt-4o"], "off");
+        assert_eq!(by_model["gpt-4o-mini"], "low");
     }
 }

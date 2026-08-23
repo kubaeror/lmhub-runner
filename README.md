@@ -14,8 +14,9 @@ The interactive TUI starts — no CLI flags:
 
 1. **Setup** tab: searchable provider list (just type to filter; grouped by
    protocol, `F` stars favorites) → models auto-load (source shown) → pick a
-   model → reasoning level → system prompt (`d` sets the default) → type a
-   task (`↑`/`↓` recall past tasks) → `Enter` runs it.
+   model → reasoning level (`d` pins the current level as the model's
+   persistent default, shown with ★) → system prompt (`d` sets the default)
+   → type a task (`↑`/`↓` recall past tasks) → `Enter` runs it.
 2. **Run** tab: multiple concurrent sessions (`[`/`]` switch) with a
    structured transcript of turns and tool calls, live token/cache/cost
    counters, `c` cancels, `R` reruns. Runs beyond the concurrency cap
@@ -23,8 +24,12 @@ The interactive TUI starts — no CLI flags:
    pending and auto-start when a slot frees.
 3. **Bulk runs**: `m` enables multi-select in the models pane, `Space`
    checks models **across providers** (selection survives switching), `x`
-   on the task launches them all after a confirmation modal.
-4. **History** tab: previous runs; `Enter` opens their `statistics.json`
+   on the task launches them all after a confirmation modal. Each run uses
+   its model's pinned default reasoning level when one exists.
+4. **Reasoning** tab: every model across all 194 providers with its
+   supported reasoning levels (type to filter, `D` cycles the ★ default on
+   the selected model, F5 reloads the snapshot).
+5. **History** tab: previous runs; `Enter` opens their `statistics.json`
    pretty-printed (tokens, performance, tool calls, pricing — not raw JSON).
 
 `:` opens the command palette (run, bulk run, cancel all, rescan history,
@@ -207,6 +212,7 @@ live separately in `~/.config/lmhub/ui.json`:
   "last_prompt": "default",
   "last_task": "build a small CLI",
   "favorites": ["openai"],
+  "model_defaults": { "gpt-4o": "medium", "claude-3-7-sonnet": "high" },
   "task_history": ["build a small CLI", "…"],
   "max_concurrent_runs": 2
 }

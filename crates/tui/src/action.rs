@@ -66,6 +66,18 @@ pub enum Action {
     RescanHistory,
     OpenHistoryDetail,
 
+    // ---- reasoning map ----------------------------------------------------
+    MapFilter(String),
+    MapClear,
+    MapMove(i32),
+    /// `d` in the map: cycle the default reasoning for the selected model.
+    CycleModelDefault,
+    /// `d` in the setup Reasoning pane: pin the current level as the
+    /// model's default.
+    SetModelDefault,
+    /// F5 in the map: reload the Models.dev snapshot.
+    ReloadSnapshot,
+
     // ---- palette ---------------------------------------------------------
     PaletteChar(char),
     PaletteBackspace,
@@ -85,15 +97,22 @@ pub enum Screen {
     Setup,
     Run,
     History,
+    Reasoning,
 }
 
 impl Screen {
-    pub const ALL: [Screen; 3] = [Screen::Setup, Screen::Run, Screen::History];
+    pub const ALL: [Screen; 4] = [
+        Screen::Setup,
+        Screen::Run,
+        Screen::History,
+        Screen::Reasoning,
+    ];
     pub fn title(&self) -> &'static str {
         match self {
             Self::Setup => "[1] Setup",
             Self::Run => "[2] Run",
             Self::History => "[3] History",
+            Self::Reasoning => "[4] Reasoning",
         }
     }
     pub fn cycle(&self, forward: bool) -> Self {
@@ -119,6 +138,8 @@ pub enum Effect {
     LaunchRun { run_id: u64 },
     /// Rescan the history directory (fast, runs inline).
     ScanHistory,
+    /// Load the full Models.dev snapshot for the reasoning map.
+    LoadSnapshot,
     /// Persist UI prefs (favorites, task history, last selections).
     SavePrefs,
 }

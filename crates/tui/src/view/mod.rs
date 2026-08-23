@@ -3,6 +3,7 @@
 
 pub mod history;
 pub mod palette;
+pub mod reasoning;
 pub mod run;
 pub mod setup;
 pub mod shared;
@@ -48,6 +49,7 @@ pub fn draw(f: &mut Frame, state: &mut State) {
         Screen::Setup => setup::draw(f, state, chunks[1]),
         Screen::Run => run::draw(f, state, chunks[1]),
         Screen::History => history::draw(f, state, chunks[1]),
+        Screen::Reasoning => reasoning::draw(f, state, chunks[1]),
     }
 
     let footer = Line::from(vec![

@@ -36,6 +36,7 @@ pub fn dispatch(state: &State, key: KeyEvent) -> Option<Action> {
         crate::action::Screen::Setup => setup_keys(state, key),
         crate::action::Screen::Run => run_keys(key),
         crate::action::Screen::History => history_keys(key),
+        crate::action::Screen::Reasoning => reasoning_map_keys(state, key),
     }
 }
 
@@ -112,6 +113,7 @@ fn setup_keys(state: &State, key: KeyEvent) -> Option<Action> {
         Pane::Reasoning => match key.code {
             KeyCode::Up => Some(Action::CycleReasoning(-1)),
             KeyCode::Down => Some(Action::CycleReasoning(1)),
+            KeyCode::Char('d') => Some(Action::SetModelDefault),
             _ => None,
         },
         Pane::Prompts => match key.code {
@@ -161,6 +163,19 @@ fn history_keys(key: KeyEvent) -> Option<Action> {
         KeyCode::Down => Some(Action::MoveHistory(1)),
         KeyCode::F(5) => Some(Action::RescanHistory),
         KeyCode::Enter => Some(Action::OpenHistoryDetail),
+        _ => None,
+    }
+}
+
+fn reasoning_map_keys(state: &State, key: KeyEvent) -> Option<Action> {
+    match key.code {
+        KeyCode::Up => Some(Action::MapMove(-1)),
+        KeyCode::Down => Some(Action::MapMove(1)),
+        KeyCode::Esc => Some(Action::MapClear),
+        KeyCode::F(5) => Some(Action::ReloadSnapshot),
+        // Uppercase: lowercase letters belong to the live filter.
+        KeyCode::Char('D') => Some(Action::CycleModelDefault),
+        KeyCode::Char(c) => Some(Action::MapFilter(format!("{}{}", state.map.filter, c))),
         _ => None,
     }
 }

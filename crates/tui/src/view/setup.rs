@@ -325,14 +325,18 @@ fn draw_reasoning(f: &mut Frame, state: &State, area: ratatui::layout::Rect) {
         .setup
         .reasoning_idx
         .min(levels.len().saturating_sub(1));
+    let default = state
+        .selected_model()
+        .and_then(|m| state.prefs.model_defaults.get(&m.id).copied());
     let spans: Vec<Span> = levels
         .iter()
         .enumerate()
         .flat_map(|(i, lvl)| {
             let chosen = i == sel;
+            let is_default = default == Some(*lvl);
             [
                 Span::styled(
-                    format!("[{}]", lvl.as_str()),
+                    format!("[{}{}]", lvl.as_str(), if is_default { "★" } else { "" }),
                     Style::default()
                         .fg(if chosen { Color::Yellow } else { Color::Gray })
                         .add_modifier(if chosen {
@@ -345,9 +349,14 @@ fn draw_reasoning(f: &mut Frame, state: &State, area: ratatui::layout::Rect) {
             ]
         })
         .collect();
+    let title = if default.is_some() {
+        " Reasoning (★default, d=set) "
+    } else {
+        " Reasoning (d=set default) "
+    };
     f.render_widget(
         Paragraph::new(Line::from(spans)).block(bordered_block(
-            " Reasoning ",
+            title,
             focused_style(state.setup.focus, Pane::Reasoning),
         )),
         area,
