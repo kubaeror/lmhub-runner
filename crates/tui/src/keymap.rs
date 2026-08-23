@@ -125,7 +125,16 @@ fn setup_keys(state: &State, key: KeyEvent) -> Option<Action> {
         Pane::Task => match key.code {
             KeyCode::Up => Some(Action::TaskRecall(1)),
             KeyCode::Down => Some(Action::TaskRecall(-1)),
-            KeyCode::Enter => Some(Action::StartRun),
+            // Enter edits (newline); Ctrl+Enter runs — chat-UI convention.
+            KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Some(Action::StartRun)
+            }
+            KeyCode::Enter => Some(Action::TaskNewline),
+            KeyCode::Left => Some(Action::TaskCursorMove(-1)),
+            KeyCode::Right => Some(Action::TaskCursorMove(1)),
+            KeyCode::Home => Some(Action::TaskCursorLineStart),
+            KeyCode::End => Some(Action::TaskCursorLineEnd),
+            KeyCode::Delete => Some(Action::TaskDelete),
             KeyCode::Backspace => Some(Action::TaskBackspace),
             KeyCode::Char('x') => Some(Action::BulkStart),
             KeyCode::Char(c) => Some(Action::TaskChar(c)),
@@ -261,8 +270,13 @@ mod tests {
     fn task_pane_keys() {
         let mut s = state_with();
         s.setup.focus = Pane::Task;
+        // Plain Enter inserts a newline; Ctrl+Enter starts the run.
         assert!(matches!(
             dispatch(&s, key(KeyCode::Enter)),
+            Some(Action::TaskNewline)
+        ));
+        assert!(matches!(
+            dispatch(&s, KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)),
             Some(Action::StartRun)
         ));
         assert!(matches!(

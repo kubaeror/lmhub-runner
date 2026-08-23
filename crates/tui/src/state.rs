@@ -179,6 +179,9 @@ pub struct SetupState {
     pub reasoning_idx: usize,
     pub prompt_idx: usize,
     pub task_input: String,
+    /// Byte offset of the edit cursor inside `task_input` (always on a char
+    /// boundary). Only meaningful when the Task pane is focused.
+    pub task_cursor: usize,
     /// Position in the recalled task history (None = typing fresh text).
     pub task_recall_idx: Option<usize>,
     /// Multi-select mode for models (bulk start).
@@ -350,6 +353,7 @@ impl State {
         // Restore last selections where possible.
         if let Some(task) = state.prefs.last_task.clone() {
             state.setup.task_input = task;
+            state.setup.task_cursor = state.setup.task_input.len();
         }
         if let Some(pid) = state.prefs.last_provider.clone() {
             if let Some(idx) = state.registry.all().iter().position(|p| p.id() == pid) {

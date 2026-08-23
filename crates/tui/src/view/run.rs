@@ -15,7 +15,7 @@ use ratatui::{
 pub fn draw(f: &mut Frame, state: &mut State, area: Rect) {
     if state.runs.runs.is_empty() {
         f.render_widget(
-            Paragraph::new("No runs yet. Configure one in Setup and press Enter on Task."),
+            Paragraph::new("No runs yet. Configure one in Setup and press Ctrl+Enter on Task."),
             area,
         );
         return;

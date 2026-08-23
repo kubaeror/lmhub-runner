@@ -30,8 +30,8 @@ pub use state::State;
 use action::Effect;
 use crossterm::{
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyEvent, KeyEventKind,
-        MouseEventKind,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, KeyEvent, KeyEventKind, MouseEventKind,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -90,8 +90,16 @@ pub async fn run_tui(ctx: TuiContext) -> anyhow::Result<()> {
     use anyhow::Context as _;
     enable_raw_mode().context("TUI requires an interactive terminal (run inside a real tty)")?;
     let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
-        .context("entering alternate screen failed")?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        // Bracketed paste: pasted text arrives as a single `Event::Paste`
+        // instead of a burst of key events (which would trigger app-level
+        // bindings like `q` quit or `x` bulk-run from pasted content).
+        EnableBracketedPaste
+    )
+    .context("entering alternate screen failed")?;
     let backend = CrosstermBackend::new(std::io::stdout());
     let mut terminal = Terminal::new(backend).context("terminal backend init failed")?;
 
@@ -187,13 +195,18 @@ pub async fn run_tui(ctx: TuiContext) -> anyhow::Result<()> {
     state.prefs.save(&state.prefs_path);
     execute!(std::io::stdout(), DisableMouseCapture)?;
     disable_raw_mode()?;
-    execute!(std::io::stdout(), LeaveAlternateScreen)?;
+    execute!(
+        std::io::stdout(),
+        LeaveAlternateScreen,
+        DisableBracketedPaste
+    )?;
     result
 }
 
 fn handle_input(state: &mut State, event: Event) {
     let action = match event {
         Event::Key(key) => key_action(state, key),
+        Event::Paste(text) => Some(Action::Paste(text)),
         Event::Mouse(m) => match m.kind {
             MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
                 view::mouse_action(state, m.column, m.row)

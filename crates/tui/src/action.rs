@@ -39,8 +39,19 @@ pub enum Action {
     SetDefaultPrompt,
     TaskChar(char),
     TaskBackspace,
+    /// `Enter` on Task: insert a newline at the cursor.
+    TaskNewline,
+    /// `←`/`→` on Task: move the cursor by one character.
+    TaskCursorMove(i32),
+    /// `Home`/`End` on Task: jump to the start/end of the current line.
+    TaskCursorLineStart,
+    TaskCursorLineEnd,
+    /// `Delete` on Task: delete the character at the cursor.
+    TaskDelete,
+    /// Bracketed-paste text: inserted into the focused input field.
+    Paste(String),
     TaskRecall(i32),
-    /// `Enter` on Task: run the current single selection.
+    /// `Ctrl+Enter` on Task: run the current single selection.
     StartRun,
     /// `x` on Task: bulk-launch every selected (provider, model) pair.
     BulkStart,

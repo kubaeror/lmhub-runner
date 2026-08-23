@@ -162,15 +162,59 @@ impl State {
                 if c.is_control() {
                     return Vec::new();
                 }
-                self.setup.task_input.push(c);
+                let text = &mut self.setup.task_input;
+                if text.is_char_boundary(self.setup.task_cursor) {
+                    text.insert(self.setup.task_cursor, c);
+                }
+                self.setup.task_cursor += c.len_utf8();
                 self.setup.task_recall_idx = None;
                 Vec::new()
             }
             Action::TaskBackspace => {
-                self.setup.task_input.pop();
+                let prev = prev_char_boundary(&self.setup.task_input, self.setup.task_cursor);
+                self.setup.task_input.drain(prev..self.setup.task_cursor);
+                self.setup.task_cursor = prev;
                 self.setup.task_recall_idx = None;
                 Vec::new()
             }
+            Action::TaskNewline => {
+                self.setup.task_input.insert(self.setup.task_cursor, '\n');
+                self.setup.task_cursor += 1;
+                self.setup.task_recall_idx = None;
+                Vec::new()
+            }
+            Action::TaskCursorMove(delta) => {
+                self.setup.task_cursor = if delta < 0 {
+                    prev_char_boundary(&self.setup.task_input, self.setup.task_cursor)
+                } else {
+                    next_char_boundary(&self.setup.task_input, self.setup.task_cursor)
+                };
+                self.setup.task_recall_idx = None;
+                Vec::new()
+            }
+            Action::TaskCursorLineStart => {
+                let line_start = self.setup.task_input[..self.setup.task_cursor]
+                    .rfind('\n')
+                    .map_or(0, |i| i + 1);
+                self.setup.task_cursor = line_start;
+                Vec::new()
+            }
+            Action::TaskCursorLineEnd => {
+                let line_end = self.setup.task_input[self.setup.task_cursor..]
+                    .find('\n')
+                    .map_or(self.setup.task_input.len(), |i| self.setup.task_cursor + i);
+                self.setup.task_cursor = line_end;
+                Vec::new()
+            }
+            Action::TaskDelete => {
+                let next = next_char_boundary(&self.setup.task_input, self.setup.task_cursor);
+                if next > self.setup.task_cursor {
+                    self.setup.task_input.drain(self.setup.task_cursor..next);
+                }
+                self.setup.task_recall_idx = None;
+                Vec::new()
+            }
+            Action::Paste(text) => self.paste_text(text),
             Action::TaskRecall(delta) => self.task_recall(delta),
             Action::StartRun => self.start_run(),
             Action::BulkStart => self.bulk_start(),
@@ -685,6 +729,7 @@ impl State {
         };
         self.setup.task_recall_idx = Some(pos);
         self.setup.task_input = hist[pos].clone();
+        self.setup.task_cursor = self.setup.task_input.len();
         Vec::new()
     }
 
@@ -1009,6 +1054,76 @@ impl State {
     }
 }
 
+/// Previous UTF-8 char boundary strictly before `idx` (clamped to 0).
+/// `idx` itself is expected to be a boundary already.
+fn prev_char_boundary(s: &str, idx: usize) -> usize {
+    let mut i = idx.min(s.len()).saturating_sub(1);
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// Clamp `idx` to the nearest UTF-8 char boundary at or before it.
+/// Shared with the view layer so drawing can never panic on a stale cursor.
+pub(crate) fn floor_char_boundary(s: &str, idx: usize) -> usize {
+    let mut i = idx.min(s.len());
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+impl State {
+    /// Paste (bracketed-paste text) into the focused input field.
+    ///
+    /// Line endings are normalized to `\n`. The Task pane accepts multi-line
+    /// text at the cursor; single-line fields (modals, search filters) get
+    /// every control character stripped.
+    fn paste_text(&mut self, raw: String) -> Vec<Effect> {
+        let text = raw.replace("\r\n", "\n").replace('\r', "\n");
+        if let Some(Modal::EnterKey { input, .. }) = &mut self.modal {
+            input.extend(text.chars().filter(|c| !c.is_control()));
+            return Vec::new();
+        }
+        if let Some(Modal::Palette { filter, .. }) = &mut self.modal {
+            filter.extend(text.chars().filter(|c| !c.is_control()));
+            return Vec::new();
+        }
+        match self.screen {
+            Screen::Setup if self.setup.focus == Pane::Task => {
+                self.setup.task_cursor =
+                    floor_char_boundary(&self.setup.task_input, self.setup.task_cursor);
+                let t = &mut self.setup.task_input;
+                t.insert_str(self.setup.task_cursor, &text);
+                self.setup.task_cursor += text.len();
+                self.setup.task_recall_idx = None;
+            }
+            Screen::Setup if self.setup.focus == Pane::Providers => {
+                self.setup
+                    .provider_filter
+                    .extend(text.chars().filter(|c| !c.is_control()));
+            }
+            Screen::Reasoning => {
+                self.map
+                    .filter
+                    .extend(text.chars().filter(|c| !c.is_control()));
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+}
+
+/// Next UTF-8 char boundary strictly after `idx` (clamped to `s.len()`).
+fn next_char_boundary(s: &str, idx: usize) -> usize {
+    let mut i = idx.saturating_add(1).min(s.len());
+    while i < s.len() && !s.is_char_boundary(i) {
+        i += 1;
+    }
+    i
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1115,6 +1230,135 @@ mod tests {
         // Typing resets recall position.
         state.reduce(Action::TaskChar('!'));
         assert!(state.setup.task_recall_idx.is_none());
+    }
+
+    #[test]
+    fn task_editor_supports_multiline_and_cursor() {
+        let (mut state, _dir) = test_state();
+        // Enter inserts a newline at the cursor, not just at the end.
+        for c in ['a', 'b'] {
+            state.reduce(Action::TaskChar(c));
+        }
+        state.reduce(Action::TaskCursorLineStart);
+        state.reduce(Action::TaskNewline);
+        assert_eq!(state.setup.task_input, "\nab");
+        // Typing at the cursor inserts mid-buffer (cursor sits after '\n').
+        state.reduce(Action::TaskCursorMove(1));
+        state.reduce(Action::TaskChar('X'));
+        assert_eq!(state.setup.task_input, "\naXb");
+        // Backspace removes the char before the cursor.
+        state.reduce(Action::TaskBackspace);
+        assert_eq!(state.setup.task_input, "\nab");
+        // Home/End jump to line start/end.
+        state.reduce(Action::TaskCursorLineStart);
+        state.reduce(Action::TaskCursorLineEnd);
+        assert_eq!(state.setup.task_cursor, state.setup.task_input.len());
+        // Delete removes the char at the cursor.
+        state.reduce(Action::TaskCursorLineStart);
+        state.reduce(Action::TaskDelete); // removes 'a' of line "ab"
+        assert_eq!(state.setup.task_input, "\nb");
+        state.reduce(Action::TaskDelete); // removes 'b'
+        assert_eq!(state.setup.task_input, "\n");
+        state.reduce(Action::TaskCursorMove(-1)); // step before the newline
+        state.reduce(Action::TaskDelete); // removes the newline
+        assert_eq!(state.setup.task_input, "");
+        // Cursor never lands mid-UTF-8: moving left/right walks chars.
+        state.reduce(Action::TaskChar('é'));
+        state.reduce(Action::TaskCursorMove(-1));
+        assert!(state
+            .setup
+            .task_input
+            .is_char_boundary(state.setup.task_cursor));
+        // History recall drops the cursor at the end of the recalled text.
+        state.prefs.task_history = vec!["multi\nline task".into()];
+        state.reduce(Action::TaskRecall(1));
+        assert_eq!(state.setup.task_cursor, state.setup.task_input.len());
+    }
+
+    #[test]
+    fn paste_multiline_text_into_task() {
+        let (mut state, _dir) = test_state();
+        state.setup.focus = Pane::Task;
+        // CRLF and lone CR both normalize to LF.
+        let pasted = "step 1\r\nstep 2\rstep 3\n";
+        state.reduce(Action::Paste(pasted.into()));
+        assert_eq!(state.setup.task_input, "step 1\nstep 2\nstep 3\n");
+        assert_eq!(state.setup.task_cursor, state.setup.task_input.len());
+        // Pasting mid-buffer inserts at the cursor (here: the trailing
+        // empty line after the final newline).
+        state.reduce(Action::TaskCursorLineStart);
+        state.reduce(Action::Paste("head\n".into()));
+        assert_eq!(state.setup.task_input, "step 1\nstep 2\nstep 3\nhead\n");
+        // Cursor stays on a char boundary with multi-byte content around it.
+        state.reduce(Action::TaskCursorLineStart); // start of the "head" line
+        state.reduce(Action::TaskChar('é'));
+        state.reduce(Action::Paste("+".into()));
+        assert!(state
+            .setup
+            .task_input
+            .is_char_boundary(state.setup.task_cursor));
+    }
+
+    #[test]
+    fn paste_strips_controls_in_single_line_fields() {
+        let (mut state, _dir) = test_state();
+        // Provider search: multi-line paste collapses to one line.
+        state.setup.focus = Pane::Providers;
+        state.reduce(Action::Paste("an\nthropic".into()));
+        assert_eq!(state.setup.provider_filter, "anthropic");
+        // Reasoning-map filter behaves the same (`\r` normalizes to `\n`,
+        // then the newline is stripped as a control char).
+        state.screen = crate::action::Screen::Reasoning;
+        state.reduce(Action::Paste("gpt\ro1".into()));
+        assert_eq!(state.map.filter, "gpto1");
+        // EnterKey modal: single line, no controls.
+        state.modal = Some(Modal::EnterKey {
+            provider_id: "x".into(),
+            input: "sk-".into(),
+        });
+        state.reduce(Action::Paste("abc\ndef".into()));
+        assert!(matches!(
+            &state.modal,
+            Some(Modal::EnterKey { input, .. }) if input == "sk-abcdef"
+        ));
+    }
+
+    /// Simulate the pre-bracketed-paste path: a paste arriving as a burst of
+    /// key events must never corrupt the task buffer or the cursor.
+    #[test]
+    fn paste_as_key_events_keeps_invariants() {
+        let (mut state, _dir) = test_state();
+        state.setup.focus = Pane::Task;
+        let pasted = "build a\nmulti-line\nprompt\n";
+        for ch in pasted.chars() {
+            let key = if ch == '\n' {
+                crossterm::event::KeyCode::Enter
+            } else {
+                crossterm::event::KeyCode::Char(ch)
+            };
+            let action = crate::keymap::dispatch(
+                &state,
+                crossterm::event::KeyEvent::new(key, crossterm::event::KeyModifiers::NONE),
+            );
+            if let Some(a) = action {
+                state.reduce(a);
+            }
+            assert!(
+                state.setup.task_cursor <= state.setup.task_input.len(),
+                "cursor out of range after {ch:?}"
+            );
+            assert!(
+                state
+                    .setup
+                    .task_input
+                    .is_char_boundary(state.setup.task_cursor),
+                "cursor mid-char after {ch:?}"
+            );
+        }
+        assert_eq!(
+            state.setup.task_input, "build a\nmulti-line\nprompt\n",
+            "every pasted line survived"
+        );
     }
 
     #[test]
