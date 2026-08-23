@@ -51,7 +51,7 @@ jsonwebtoken = "9"
 hex = "0.4"
 dirs = "6"
 ratatui = "0.29"
-crossterm = "0.28"
+crossterm = "0.29"
 
 [package]
 name = "lmhub-runner"
