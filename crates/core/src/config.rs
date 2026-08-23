@@ -30,6 +30,9 @@ pub struct AppConfig {
     pub retry_base_ms: u64,
     /// Backoff cap.
     pub retry_cap_ms: u64,
+    /// Command isolation backend: `auto` (bubblewrap when available, legacy
+    /// otherwise), `bwrap` (require it), or `legacy` (no OS isolation).
+    pub sandbox: String,
 }
 
 impl Default for AppConfig {
@@ -47,6 +50,7 @@ impl Default for AppConfig {
             max_retries: 6,
             retry_base_ms: 500,
             retry_cap_ms: 30_000,
+            sandbox: "auto".into(),
         }
     }
 }
@@ -101,6 +105,17 @@ impl AppConfig {
             self.allowed_commands = vec!["node".into(), "npm".into(), "npx".into()];
         } else {
             self.allowed_commands = cleaned;
+        }
+        let sb = self.sandbox.trim().to_ascii_lowercase();
+        if sb != "auto" && sb != "bwrap" && sb != "legacy" {
+            tracing::warn!(
+                config = "sandbox",
+                value = %self.sandbox,
+                "unknown sandbox mode; falling back to auto"
+            );
+            self.sandbox = "auto".into();
+        } else {
+            self.sandbox = sb;
         }
     }
 

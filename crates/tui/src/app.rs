@@ -99,6 +99,7 @@ pub struct App {
     pub prompts: Vec<PromptFile>,
     pub output_base: PathBuf,
     pub auth_store: std::sync::Arc<std::sync::Mutex<lmhub_core::AuthStore>>,
+    pub sandbox_runtime: lmhub_sandbox::SandboxRuntime,
     ui_tx: tokio::sync::mpsc::UnboundedSender<UiMsg>,
 
     pub mode: Mode,
@@ -141,6 +142,7 @@ impl App {
         prompts: Vec<PromptFile>,
         output_base: PathBuf,
         auth_store: std::sync::Arc<std::sync::Mutex<lmhub_core::AuthStore>>,
+        sandbox_runtime: lmhub_sandbox::SandboxRuntime,
         ui_tx: tokio::sync::mpsc::UnboundedSender<UiMsg>,
     ) -> Self {
         // Preselect default prompt if configured.
@@ -157,6 +159,7 @@ impl App {
             prompts,
             output_base,
             auth_store,
+            sandbox_runtime,
             ui_tx,
             mode: Mode::Normal,
             key_input: String::new(),
@@ -418,6 +421,7 @@ impl App {
                 command_timeout: self.config.command_timeout(),
                 read_file_max_bytes: self.config.read_file_max_bytes,
                 write_file_max_bytes: self.config.write_file_max_bytes,
+                runtime: self.sandbox_runtime.clone(),
             },
         };
 

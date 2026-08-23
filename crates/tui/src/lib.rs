@@ -51,6 +51,7 @@ pub struct TuiContext {
     pub prompts: Vec<PromptFile>,
     pub output_base: PathBuf,
     pub auth_store: Arc<std::sync::Mutex<lmhub_core::AuthStore>>,
+    pub sandbox_runtime: lmhub_sandbox::SandboxRuntime,
 }
 
 /// UI tick: how often the screen redraws even without input/events.
@@ -85,6 +86,7 @@ pub async fn run_tui(ctx: TuiContext) -> anyhow::Result<()> {
         ctx.prompts,
         ctx.output_base,
         ctx.auth_store,
+        ctx.sandbox_runtime,
         ui_tx,
     );
     // Auto-load models for the initially selected provider.

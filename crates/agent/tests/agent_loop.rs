@@ -116,10 +116,11 @@ fn spec(base: &std::path::Path, provider: Arc<dyn Provider>) -> RunSpec {
         deadline: Duration::from_secs(30),
         cancel: tokio_util::sync::CancellationToken::new(),
         sandbox: lmhub_sandbox::SandboxConfig {
-            allowed_commands: vec![],
-            command_timeout: Duration::from_secs(10),
-            read_file_max_bytes: 48_000,
-            write_file_max_bytes: 1_000_000,
+            allowed_commands: vec!["node".into()],
+            command_timeout: Duration::from_secs(30),
+            read_file_max_bytes: 4096,
+            write_file_max_bytes: 1_048_576,
+            runtime: lmhub_sandbox::SandboxRuntime::Legacy,
         },
     }
 }

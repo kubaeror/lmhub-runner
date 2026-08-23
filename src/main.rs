@@ -84,6 +84,14 @@ async fn run(
 
     init_logging(&cache_dir)?;
 
+    // Resolve the command-isolation backend once; warn loudly on fallback
+    // (after logging is live so the warning also lands in runner.log).
+    let (sandbox_runtime, sandbox_warnings) = lmhub_sandbox::detect_runtime(&config.sandbox);
+    for w in &sandbox_warnings {
+        tracing::warn!("{w}");
+        eprintln!("lmhub: {w}");
+    }
+
     lmhub_modelsdev::ensure_cache_dir(&cache_dir)
         .with_context(|| format!("creating cache dir {}", cache_dir.display()))?;
     let modelsdev = Arc::new(ModelsDevClient::new(
@@ -112,6 +120,7 @@ async fn run(
         prompts,
         output_base,
         auth_store,
+        sandbox_runtime,
     };
     lmhub_tui::run_tui(ctx).await
 }

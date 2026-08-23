@@ -109,6 +109,8 @@ pub struct SandboxConfig {
     pub command_timeout: Duration,
     pub read_file_max_bytes: u64,
     pub write_file_max_bytes: u64,
+    /// OS-level isolation backend for `run_command`.
+    pub runtime: crate::runtime::SandboxRuntime,
 }
 
 #[derive(Debug, Clone)]
@@ -574,6 +576,7 @@ impl ToolRuntime {
             &self.home_dir,
             Duration::from_secs(timeout_secs),
             &id,
+            &self.config.runtime,
         )
         .await;
 
@@ -690,6 +693,7 @@ mod tests {
                 command_timeout: Duration::from_secs(30),
                 read_file_max_bytes: 1024,
                 write_file_max_bytes: 1_048_576,
+                runtime: crate::runtime::SandboxRuntime::Legacy,
             },
         )
         .unwrap();

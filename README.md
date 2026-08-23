@@ -61,8 +61,25 @@ The model can only affect its `output-modelu/` directory:
 - violations land in `errors.log` and `events.jsonl`;
 - the runner never logs API keys or environment secrets (values are scrubbed).
 
-Note: this is application-level sandboxing, not OS-level isolation (no
-namespaces/seccomp). Run only with providers you trust accordingly.
+### OS-level isolation
+
+When **bubblewrap** (`bwrap`) is installed — auto-detected at startup — each
+command runs inside user/pid/ipc/uts namespaces with a read-only view of the
+system (`/usr`, `/bin`, `/lib`, `/lib64`, `/etc`) and the model workspace as
+the only writable directory. `/proc` and `/dev` are fresh sandbox instances,
+so the command cannot see host processes or devices. **Network stays allowed**
+so `npm install` works. In **legacy mode** (bwrap missing, or user namespaces
+blocked — e.g. Ubuntu 24.04's `apparmor_restrict_unprivileged_userns`), the
+command runs directly, and a **seccomp deny-list** (ptrace, cross-process
+memory access, mounts, kernel module loading, bpf, userfaultfd, io_uring,
+`unshare`/`setns`, namespace-flag `clone`) applies instead; legacy mode logs
+a loud warning at startup. Seccomp cannot apply to the bwrap wrapper itself
+(bwrap needs those very syscalls), so under bwrap the namespace split carries
+that protection. Tune with `sandbox = "auto" | "bwrap" | "legacy"` in
+`~/.config/lmhub/config.toml` (or `LMHUB_BWRAP` for the bwrap path).
+
+Note: this is still application-level sandboxing (no full OS virtualisation).
+Run only with providers you trust accordingly.
 
 ## Model list & pricing provenance
 
@@ -160,6 +177,7 @@ modelsdev_ttl_secs = 86400
 max_output_tokens = 16384
 read_file_max_bytes = 48000
 write_file_max_bytes = 1000000
+sandbox = "auto"        # auto | bwrap | legacy (command isolation backend)
 ```
 
 Paths default to the project directory and OS config/cache dirs; every path
