@@ -1,0 +1,88 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/modelsdev",
+    "crates/providers",
+    "crates/sandbox",
+    "crates/agent",
+    "crates/tui",
+    "xtask",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = "https://example.com/lmhub-runner"
+
+[workspace.dependencies]
+lmhub-core = { path = "crates/core" }
+lmhub-modelsdev = { path = "crates/modelsdev" }
+lmhub-providers = { path = "crates/providers" }
+lmhub-sandbox = { path = "crates/sandbox" }
+lmhub-agent = { path = "crates/agent" }
+lmhub-tui = { path = "crates/tui" }
+
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "time",
+    "sync",
+    "fs",
+    "process",
+    "signal",
+    "io-util",
+] }
+tokio-util = "0.7"
+futures = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+async-trait = "0.1"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+sha2 = "0.10"
+hmac = "0.12"
+jsonwebtoken = "9"
+hex = "0.4"
+dirs = "6"
+ratatui = "0.29"
+crossterm = "0.28"
+
+[package]
+name = "lmhub-runner"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Independent AI runner: coding agents with sandboxed workspaces"
+
+[[bin]]
+name = "lmhub-runner"
+path = "src/main.rs"
+
+[dependencies]
+lmhub-core = { workspace = true }
+lmhub-modelsdev = { workspace = true }
+lmhub-providers = { workspace = true }
+lmhub-sandbox = { workspace = true }
+lmhub-agent = { workspace = true }
+lmhub-tui = { workspace = true }
+
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+chrono = { workspace = true }
+dirs = { workspace = true }
+
+[profile.release]
+lto = "thin"

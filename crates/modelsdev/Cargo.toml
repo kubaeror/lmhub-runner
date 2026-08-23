@@ -1,0 +1,23 @@
+[package]
+name = "lmhub-modelsdev"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Models.dev catalog client with local caching for lmhub-runner"
+
+[dependencies]
+lmhub-core = { workspace = true }
+
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

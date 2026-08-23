@@ -1,0 +1,25 @@
+[package]
+name = "lmhub-tui"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Terminal UI for lmhub-runner"
+
+[dependencies]
+lmhub-core = { workspace = true }
+lmhub-modelsdev = { workspace = true }
+lmhub-providers = { workspace = true }
+lmhub-agent = { workspace = true }
+lmhub-sandbox = { workspace = true }
+
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+serde_json = { workspace = true }
+serde = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
+uuid = { workspace = true }

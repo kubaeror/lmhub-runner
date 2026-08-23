@@ -1,0 +1,48 @@
+# Custom provider template for lmhub-runner.
+#
+# Copy this file to e.g. providers/my-provider.toml and adjust.
+# The runner loads every valid *.toml in providers/ at startup —
+# no core changes are needed to add a provider.
+
+id = "my-provider"
+name = "My Provider"
+
+# Protocol of the upstream API:
+#   "openai-compatible"      → POST {base_url}{chat_path} with OpenAI payload
+#   "anthropic-compatible"   → POST {base_url}{chat_path} with Anthropic payload
+api_type = "openai-compatible"
+
+base_url = "https://api.example.com/v1"
+api_key_env = "MY_PROVIDER_API_KEY"
+
+# Optional overrides:
+# chat_path = "/chat/completions"          # default depends on api_type
+# models_path = "/models"                  # omit to disable model listing
+
+# Capability flags (used to decide request features):
+supports_tool_calls = true
+supports_reasoning = true
+supports_prompt_caching = false
+
+# Optional: Models.dev provider id used to enrich metadata and pricing
+# (falls back to matching by model id across the whole catalog).
+models_dev_provider = "example-ai"
+
+# Static model list — the local fallback when the API has no /models
+# endpoint or it fails. Family decides the output/ directory name
+# (heuristic from the id prefix otherwise).
+[[models]]
+id = "model-a"
+name = "Model A"
+family = "GLM"
+reasoning = true
+tool_call = true
+context_window = 128000
+max_output = 8192
+
+[[models]]
+id = "model-b"
+name = "Model B (cheap)"
+family = "GLM"
+reasoning = false
+tool_call = true

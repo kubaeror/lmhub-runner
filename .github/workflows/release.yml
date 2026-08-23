@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-latest, target: aarch64-unknown-linux-musl, cross: true }
+          - { os: macos-14, target: aarch64-apple-darwin }
+          - { os: macos-13, target: x86_64-apple-darwin }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross (aarch64 linux)
+        if: matrix.cross == true
+        run: cargo install cross --locked
+
+      - name: Build
+        working-directory: ${{ !matrix.cross && '.' || '.' }}
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --locked --target ${{ matrix.target }}
+          else
+            cargo build --release --locked --target ${{ matrix.target }}
+          fi
+
+      - name: Package
+        id: pkg
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          NAME="lmhub-runner-${VERSION}-${{ matrix.target }}"
+          OUT="$NAME"
+          mkdir -p "$OUT/prompts" "$OUT/providers"
+          BIN="target/${{ matrix.target }}/release/lmhub-runner"
+          [ -f "$BIN" ] || BIN="target/release/lmhub-runner"
+          strip "$BIN" 2>/dev/null || true
+          cp "$BIN" "$OUT/"
+          cp prompts/*.md "$OUT/prompts/" 2>/dev/null || true
+          cp providers/example.toml.example "$OUT/providers/" 2>/dev/null || true
+          tar czf "$NAME.tar.gz" "$OUT"
+          echo "asset=$NAME.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pkg.outputs.asset }}
+          path: ${{ steps.pkg.outputs.asset }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: dist/*.tar.gz
