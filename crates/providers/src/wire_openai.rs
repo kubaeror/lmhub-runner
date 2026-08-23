@@ -295,6 +295,16 @@ pub fn strip_stream_options(payload: &mut Value) {
     }
 }
 
+/// Fall back from `max_completion_tokens` to `max_tokens` (many
+/// OpenAI-compatible servers and older models only accept the latter).
+pub fn use_max_tokens_field(payload: &mut Value) {
+    if let Some(obj) = payload.as_object_mut() {
+        if let Some(max) = obj.remove("max_completion_tokens") {
+            obj.insert("max_tokens".to_string(), max);
+        }
+    }
+}
+
 fn map_finish_reason(raw: &str) -> StopReason {
     match raw {
         "stop" | "end_turn" => StopReason::EndTurn,

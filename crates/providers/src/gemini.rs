@@ -2,8 +2,10 @@
 //!
 //! Notable mappings:
 //! - reasoning effort → `generationConfig.thinkingConfig.thinkingBudget`;
-//! - `usageMetadata.thoughtsTokenCount` is reported as separate **reasoning
-//!   tokens** (Gemini bills them inside output — no double counting);
+//! - `usageMetadata.thoughtsTokenCount` is reported as **reasoning** tokens;
+//!   whether `candidatesTokenCount` also includes them differs between the
+//!   native API and Vertex AI — `parse_usage` normalizes via `totalTokenCount`
+//!   so output is never double-counted;
 //! - `cachedContentTokenCount` → cache read tokens;
 //! - tool calls: `functionCall` parts; results: `functionResponse` parts.
 
@@ -43,7 +45,15 @@ pub fn build_payload(request: &ChatRequest) -> Value {
         });
     }
 
-    let mut generation_config = json!({"maxOutputTokens": request.max_tokens});
+    // maxOutputTokens must exceed the thinking budget when thinking is
+    // enabled (mirrors the Anthropic wire layer).
+    let mut max_output = request.max_tokens;
+    if let Some(budget) = thinking_budget(request.reasoning) {
+        if (max_output as i64) <= budget {
+            max_output = (budget + 1_024) as u32;
+        }
+    }
+    let mut generation_config = json!({"maxOutputTokens": max_output});
     if let Some(budget) = thinking_budget(request.reasoning) {
         generation_config["thinkingConfig"] = json!({"thinkingBudget": budget});
     }
@@ -169,7 +179,14 @@ pub fn parse_response(
     })
 }
 
-/// Gemini counts cached tokens as a subset of promptTokenCount.
+/// Gemini usage normalization.
+///
+/// On the native API, `totalTokenCount = prompt + candidates + toolUse +
+/// thoughts` — thinking tokens are reported separately from
+/// `candidatesTokenCount` and billed as output. On Vertex AI,
+/// `candidatesTokenCount` already includes thinking tokens. Mirror
+/// LiteLLM's heuristic (`prompt + candidates + toolUse == total` implies
+/// inclusive) so output is never double-counted on either path.
 fn parse_usage(u: &Value) -> Usage {
     let prompt = u
         .get("promptTokenCount")
@@ -181,9 +198,22 @@ fn parse_usage(u: &Value) -> Usage {
         .unwrap_or(0);
     let thoughts = u.get("thoughtsTokenCount").and_then(|v| v.as_u64());
     let cached = u.get("cachedContentTokenCount").and_then(|v| v.as_u64());
+    let tool_use = u
+        .get("toolUsePromptTokenCount")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let total = u.get("totalTokenCount").and_then(|v| v.as_u64());
+    let thoughts_included = total
+        .map(|t| prompt.saturating_add(output).saturating_add(tool_use) >= t)
+        .unwrap_or(false);
+    let output_tokens = if thoughts_included {
+        output
+    } else {
+        output.saturating_add(thoughts.unwrap_or(0))
+    };
     Usage {
         input_tokens: prompt,
-        output_tokens: output.saturating_add(thoughts.unwrap_or(0)),
+        output_tokens,
         reasoning_tokens: thoughts,
         cache_read_tokens: cached,
         cache_write_tokens: None,
@@ -241,7 +271,9 @@ mod tests {
             p["systemInstruction"]["parts"][0]["text"],
             json!("You are a coding agent.")
         );
-        assert_eq!(p["generationConfig"]["maxOutputTokens"], json!(2_048));
+        // maxOutputTokens is bumped above the thinking budget (8_192) so
+        // Gemini does not reject the request.
+        assert_eq!(p["generationConfig"]["maxOutputTokens"], json!(9_216));
         assert_eq!(
             p["generationConfig"]["thinkingConfig"]["thinkingBudget"],
             json!(8_192)
@@ -274,11 +306,26 @@ mod tests {
         let resp = parse_response(&body, 10, Vec::new()).unwrap();
         assert_eq!(resp.text, "calling");
         assert_eq!(resp.tool_calls[0].name, "read_file");
-        // output includes thoughts (billed), but they are ALSO reported separately
+        // No totalTokenCount → assume thoughts are NOT included in
+        // candidates (native API): output adds thoughts, reasoning reported.
         assert_eq!(resp.usage.output_tokens, 25);
         assert_eq!(resp.usage.reasoning_tokens, Some(5));
         assert_eq!(resp.usage.cache_read_tokens, Some(40));
         assert_eq!(resp.stop_reason, StopReason::EndTurn);
+    }
+
+    #[test]
+    fn usage_does_not_double_count_when_candidates_include_thoughts() {
+        // Vertex AI style: totalTokenCount == prompt + candidates, meaning
+        // candidatesTokenCount already includes the thinking tokens.
+        let usage = parse_usage(&json!({
+            "promptTokenCount": 100,
+            "candidatesTokenCount": 25,
+            "thoughtsTokenCount": 5,
+            "totalTokenCount": 125
+        }));
+        assert_eq!(usage.output_tokens, 25);
+        assert_eq!(usage.reasoning_tokens, Some(5));
     }
 
     #[test]

@@ -191,9 +191,21 @@ pub fn resolve_entry(entry: &KnownEntry) -> ResolvedKnown {
         .or_else(|| entry.npm.as_deref().and_then(npm_to_protocol))
         .unwrap_or(ProtocolKind::OpenAiCompat);
 
-    let base_url = entry
-        .api
-        .clone()
+    // Catalog URLs sometimes carry `${ENV_VAR}` placeholders (Cloudflare,
+    // Databricks, Infomaniak, Neon, Snowflake) — interpolate them now so the
+    // provider gets a concrete, working URL. Missing vars drop the URL; the
+    // provider then fails with the standard "needs an API URL" message
+    // instead of sending requests to a literal `${...}` host.
+    let mut api = entry.api.clone();
+    if let Some(url) = &api {
+        if matches!(protocol, ProtocolKind::OpenAiCompat) {
+            // Routed providers append `/chat/completions` themselves; strip a
+            // catalog URL that already includes it (e.g. `bailing`).
+            api = Some(strip_chat_suffix(url));
+        }
+    }
+    let base_url = api
+        .and_then(|u| interpolate_env(&u).ok())
         .or_else(|| fallback_url(&entry.id).map(|s| s.to_string()));
 
     let requires_key = if LOCAL_IDS.contains(&entry.id.as_str()) {
@@ -207,6 +219,48 @@ pub fn resolve_entry(entry: &KnownEntry) -> ResolvedKnown {
         protocol,
         base_url,
         requires_key,
+    }
+}
+
+/// Remove a trailing `/chat/completions` from an OpenAI-compatible base URL.
+fn strip_chat_suffix(url: &str) -> String {
+    let trimmed = url.trim_end_matches('/');
+    if let Some(rest) = trimmed.strip_suffix("/chat/completions") {
+        rest.to_string()
+    } else {
+        url.to_string()
+    }
+}
+
+/// Replace every `${VAR}` in `url` with its environment value. Returns the
+/// names of any variables that are not set.
+fn interpolate_env(url: &str) -> std::result::Result<String, Vec<String>> {
+    let mut missing = Vec::new();
+    let mut out = String::new();
+    let mut rest = url;
+    while let Some(start) = rest.find("${") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let Some(end) = after.find('}') else {
+            out.push_str(&rest[start..]);
+            rest = "";
+            break;
+        };
+        let var = &after[..end];
+        match std::env::var(var) {
+            Ok(value) => out.push_str(&value),
+            Err(_) => {
+                missing.push(var.to_string());
+                out.push_str(&rest[start..start + 2 + end + 1]);
+            }
+        }
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    if missing.is_empty() {
+        Ok(out)
+    } else {
+        Err(missing)
     }
 }
 
@@ -323,6 +377,13 @@ mod tests {
             "cloudflare-ai-gateway",
             "sap-ai-core",
             "watsonx", // WATSONX_AI_URL with documented default region host
+            // Catalog URLs with ${ENV_VAR} placeholders — resolved at
+            // registry build time; unset envs make them fail closed.
+            "cloudflare-workers-ai",
+            "databricks",
+            "infomaniak",
+            "neon",
+            "snowflake-cortex",
         ];
         let unroutable: Vec<String> = KnownCatalog::load()
             .resolved()
@@ -335,6 +396,53 @@ mod tests {
         assert!(
             unroutable.is_empty(),
             "entries without URL/fallback/dynamic handling: {unroutable:?}"
+        );
+    }
+
+    #[test]
+    fn interpolates_env_placeholders_when_set() {
+        std::env::set_var("LMHUB_TEST_ACCOUNT", "acct-123");
+        let e = KnownEntry {
+            id: "t".into(),
+            name: "T".into(),
+            npm: Some("@ai-sdk/openai-compatible".into()),
+            api: Some("https://api.example.com/accounts/${LMHUB_TEST_ACCOUNT}/ai/v1".into()),
+            env: vec!["LMHUB_TEST_ACCOUNT".into()],
+        };
+        let r = resolve_entry(&e);
+        assert_eq!(
+            r.base_url.as_deref(),
+            Some("https://api.example.com/accounts/acct-123/ai/v1")
+        );
+    }
+
+    #[test]
+    fn env_template_with_missing_var_fails_closed() {
+        std::env::remove_var("LMHUB_TEST_NEVER_SET");
+        let e = KnownEntry {
+            id: "t2".into(),
+            name: "T2".into(),
+            npm: Some("@ai-sdk/openai-compatible".into()),
+            api: Some("https://${LMHUB_TEST_NEVER_SET}/v1".into()),
+            env: vec!["LMHUB_TEST_NEVER_SET".into()],
+        };
+        let r = resolve_entry(&e);
+        assert!(r.base_url.is_none());
+    }
+
+    #[test]
+    fn strips_trailing_chat_completions_for_openai_compat() {
+        let e = KnownEntry {
+            id: "t3".into(),
+            name: "T3".into(),
+            npm: Some("@ai-sdk/openai-compatible".into()),
+            api: Some("https://api.example.com/api/llm/v1/chat/completions".into()),
+            env: vec!["T3_KEY".into()],
+        };
+        let r = resolve_entry(&e);
+        assert_eq!(
+            r.base_url.as_deref(),
+            Some("https://api.example.com/api/llm/v1")
         );
     }
 }

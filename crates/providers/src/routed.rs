@@ -386,7 +386,8 @@ impl Provider for RoutedProvider {
                 let base = self.base_url.clone().ok_or_else(|| missing_base(self))?;
                 let key = self.key().await?;
                 let url = gemini::stream_url(&base, &request.model);
-                stream_runner::gemini_sse(&self.http, url, &key, request).await
+                let headers = vec![("x-goog-api-key".to_string(), key)];
+                stream_runner::gemini_sse(&self.http, url, headers, request).await
             }
             ProtocolKind::VertexGemini => {
                 vertex::chat_stream(&self.http, false, request, &self.auth_store).await
@@ -504,7 +505,8 @@ async fn copilot_live_token(store_lock: &std::sync::Mutex<AuthStore>) -> Result<
         ));
     };
     let (token, expires_at) = copilot::copilot_token(&github_token).await?;
-    store_lock.lock().unwrap().set_credential(
+    let mut store = store_lock.lock().unwrap();
+    store.set_credential(
         copilot::PROVIDER_ID,
         lmhub_core::StoredCredential {
             kind: "oauth".into(),
@@ -514,6 +516,8 @@ async fn copilot_live_token(store_lock: &std::sync::Mutex<AuthStore>) -> Result<
             refresh_token: None,
         },
     );
+    // Persist refreshed tokens so they survive restarts.
+    store.save().map_err(CoreError::Io)?;
     Ok(token)
 }
 

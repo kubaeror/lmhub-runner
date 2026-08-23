@@ -67,12 +67,17 @@ pub async fn execute(
     };
     let reasoning_str = spec.reasoning.to_string();
 
-    // output/{family}/{model}/{reasoning}/output-modelu/
+    // Every run gets its own directory so reruns never clobber artifacts or
+    // reuse a dirty workspace: output/{family}/{model}/{reasoning}/{start}-{id8}/
+    let run_id = lmhub_core::stats::gen_run_id();
+    let started_dir =
+        chrono::Utc::now().format("%Y%m%dT%H%M%S").to_string();
     let run_dir = spec
         .output_base
         .join(lmhub_core::family::sanitize_component(&family))
         .join(lmhub_core::family::sanitize_component(&spec.model.id))
-        .join(lmhub_core::family::sanitize_component(&reasoning_str));
+        .join(lmhub_core::family::sanitize_component(&reasoning_str))
+        .join(format!("{started_dir}-{}", &run_id[..8]));
     let workspace_dir = run_dir.join("output-modelu");
 
     std::fs::create_dir_all(&workspace_dir)?;
@@ -160,6 +165,7 @@ pub async fn execute(
     // ---- statistics.json — ALWAYS ------------------------------------------
     let doc = build_document(
         status,
+        &run_id,
         &identity,
         &metrics,
         wall,
@@ -246,6 +252,9 @@ async fn run_loop(
         let used_cache = response.usage.cache_read_tokens.unwrap_or(0) > 0
             || response.usage.cache_write_tokens.unwrap_or(0) > 0;
         metrics.record_usage(&response.usage);
+        metrics.record_llm_duration(std::time::Duration::from_millis(
+            response.duration_ms,
+        ));
         if !used_cache {
             metrics.note_request_without_cache();
         }

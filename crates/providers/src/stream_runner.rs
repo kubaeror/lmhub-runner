@@ -23,12 +23,15 @@ async fn ensure_success(resp: reqwest::Response) -> Result<reqwest::Response> {
     if status.is_success() {
         return Ok(resp);
     }
+    Err(status_error(resp).await)
+}
+
+/// Turn a non-success response into the canonical provider error, consuming
+/// the body (truncated and scrubbed).
+async fn status_error(resp: reqwest::Response) -> CoreError {
+    let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
-    Err(CoreError::Provider(format!(
-        "HTTP {}: {}",
-        status.as_u16(),
-        truncate_body(&text)
-    )))
+    CoreError::Provider(format!("HTTP {}: {}", status.as_u16(), truncate_body(&text)))
 }
 
 /// Copy of the request with reasoning disabled (degradation path when a
@@ -40,8 +43,9 @@ fn without_reasoning(request: &ChatRequest) -> ChatRequest {
 }
 
 /// OpenAI-compatible streaming chat (`chat/completions`, SSE).
-/// Sends `stream_options.include_usage`; degrades once without it (and once
-/// without `reasoning_effort`) when the server rejects those fields.
+/// Sends `stream_options.include_usage`; when the server rejects an optional
+/// field with a 4xx that names it, degrades once (strip `stream_options`,
+/// drop `reasoning_effort`, or fall back to `max_tokens`) and retries.
 pub(crate) async fn openai_sse(
     http_client: &reqwest::Client,
     url: String,
@@ -54,92 +58,101 @@ pub(crate) async fn openai_sse(
             include_reasoning_effort: true,
         },
     );
+    let mut degraded = false;
 
-    let body_str = serde_json::to_string(&payload).expect("payload serializes");
-    let first = http::post_stream(http_client, &url, headers.clone(), body_str).await;
-
-    let resp = match first {
-        Ok(r) => r,
-        Err(CoreError::Provider(msg)) => {
-            let lower = msg.to_ascii_lowercase();
-            let strip_usage = lower.contains("stream_options");
-            let strip_reasoning =
-                lower.contains("reasoning_effort") && request.reasoning != ReasoningLevel::Off;
-            if !(strip_usage || strip_reasoning) {
-                return Err(CoreError::Provider(msg));
-            }
-            if strip_usage {
-                wire_openai::strip_stream_options(&mut payload);
-            }
-            if strip_reasoning {
-                payload = wire_openai::build_stream_payload(
-                    &without_reasoning(request),
-                    OpenAiWireOpts {
-                        include_reasoning_effort: false,
-                    },
-                );
-            }
-            let body_str = serde_json::to_string(&payload).expect("payload serializes");
-            http::post_stream(http_client, &url, headers, body_str).await?
-        }
-        Err(e) => return Err(e),
-    };
-    let resp = ensure_success(resp).await?;
-
-    let events = Box::pin(sse::sse_events(resp.bytes_stream()));
-    let started = Instant::now();
-    Ok(Box::pin(futures::stream::unfold(
-        (
-            events,
-            wire_openai::OpenAiStreamAccumulator::new(),
-            false,
-            started,
-        ),
-        |(mut events, mut acc, mut done, started)| async move {
-            if done {
-                return None;
-            }
-            loop {
-                match futures::StreamExt::next(&mut events).await {
-                    Some(Ok(SseEvent { data, .. })) => {
-                        if data.trim() == "[DONE]" {
-                            done = true;
-                            break;
-                        }
-                        let chunk = match sse::parse_json(&data) {
-                            Ok(v) => v,
-                            Err(e) => {
-                                done = true;
-                                return Some((Err(e), (events, acc, done, started)));
+    loop {
+        let body_str = serde_json::to_string(&payload).expect("payload serializes");
+        let resp = http::post_stream(http_client, &url, headers.clone(), body_str).await?;
+        if resp.status().is_success() {
+            let events = Box::pin(sse::sse_events(resp.bytes_stream()));
+            let started = Instant::now();
+            return Ok(Box::pin(futures::stream::unfold(
+                (
+                    events,
+                    wire_openai::OpenAiStreamAccumulator::new(),
+                    false,
+                    started,
+                ),
+                |(mut events, mut acc, mut done, started)| async move {
+                    if done {
+                        return None;
+                    }
+                    loop {
+                        match futures::StreamExt::next(&mut events).await {
+                            Some(Ok(SseEvent { data, .. })) => {
+                                if data.trim() == "[DONE]" {
+                                    done = true;
+                                    break;
+                                }
+                                let chunk = match sse::parse_json(&data) {
+                                    Ok(v) => v,
+                                    Err(e) => {
+                                        done = true;
+                                        return Some((Err(e), (events, acc, done, started)));
+                                    }
+                                };
+                                if let Some(delta) = acc.feed(&chunk) {
+                                    return Some((
+                                        Ok(ChatStreamItem::Delta(delta)),
+                                        (events, acc, done, started),
+                                    ));
+                                }
                             }
-                        };
-                        if let Some(delta) = acc.feed(&chunk) {
-                            return Some((
-                                Ok(ChatStreamItem::Delta(delta)),
-                                (events, acc, done, started),
-                            ));
+                            Some(Err(e)) => {
+                                // Lenient close: content already streamed to the user.
+                                done = true;
+                                let item = graceful_finish(&mut acc, started, Err(e));
+                                return Some((item, (events, acc, done, started)));
+                            }
+                            None => {
+                                done = true;
+                                break;
+                            }
                         }
                     }
-                    Some(Err(e)) => {
-                        // Lenient close: content already streamed to the user.
-                        done = true;
-                        let item = graceful_finish(&mut acc, started, Err(e));
-                        return Some((item, (events, acc, done, started)));
-                    }
-                    None => {
-                        done = true;
-                        break;
-                    }
-                }
-            }
-            let item = graceful_finish(&mut acc, started, Ok(()));
-            Some((item, (events, acc, done, started)))
-        },
-    )))
+                    let item = graceful_finish(&mut acc, started, Ok(()));
+                    Some((item, (events, acc, done, started)))
+                },
+            )));
+        }
+        if degraded {
+            return Err(status_error(resp).await);
+        }
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        let lower = text.to_ascii_lowercase();
+        let strip_usage = lower.contains("stream_options");
+        let strip_reasoning =
+            lower.contains("reasoning_effort") && request.reasoning != ReasoningLevel::Off;
+        let use_max_tokens = lower.contains("max_completion_tokens");
+        if strip_usage {
+            wire_openai::strip_stream_options(&mut payload);
+        }
+        if strip_reasoning {
+            payload = wire_openai::build_stream_payload(
+                &without_reasoning(request),
+                OpenAiWireOpts {
+                    include_reasoning_effort: false,
+                },
+            );
+        }
+        if use_max_tokens {
+            wire_openai::use_max_tokens_field(&mut payload);
+        }
+        if !(strip_usage || strip_reasoning || use_max_tokens) {
+            return Err(CoreError::Provider(format!(
+                "HTTP {}: {}",
+                status.as_u16(),
+                truncate_body(&text)
+            )));
+        }
+        degraded = true;
+    }
 }
 
 /// Anthropic streaming chat (Messages API SSE) — also used by
 /// Vertex-Anthropic via `:rawStreamPredict` (adds `anthropic_version`).
+/// Degrades once without the `thinking` config when a server rejects it.
 pub(crate) async fn anthropic_sse(
     http_client: &reqwest::Client,
     url: String,
@@ -155,66 +168,95 @@ pub(crate) async fn anthropic_sse(
     if url.contains(":rawStreamPredict") {
         payload["anthropic_version"] = serde_json::json!("vertex-2023-10-16");
     }
+    let mut degraded = false;
 
-    let body_str = serde_json::to_string(&payload).expect("payload serializes");
-    let resp = http::post_stream(http_client, &url, headers, body_str).await?;
-    let resp = ensure_success(resp).await?;
-
-    let events = Box::pin(sse::sse_events(resp.bytes_stream()));
-    let started = Instant::now();
-    Ok(Box::pin(futures::stream::unfold(
-        (events, AnthropicStreamAccumulator::new(), false, started),
-        |(mut events, mut acc, mut done, started)| async move {
-            if done {
-                return None;
-            }
-            loop {
-                match futures::StreamExt::next(&mut events).await {
-                    Some(Ok(SseEvent { event, data })) => {
-                        let data_value = match sse::parse_json(&data) {
-                            Ok(v) => v,
-                            Err(e) => {
-                                done = true;
-                                return Some((Err(e), (events, acc, done, started)));
+    loop {
+        let body_str = serde_json::to_string(&payload).expect("payload serializes");
+        let resp = http::post_stream(http_client, &url, headers.clone(), body_str).await?;
+        if resp.status().is_success() {
+            let events = Box::pin(sse::sse_events(resp.bytes_stream()));
+            let started = Instant::now();
+            return Ok(Box::pin(futures::stream::unfold(
+                (events, AnthropicStreamAccumulator::new(), false, started),
+                |(mut events, mut acc, mut done, started)| async move {
+                    if done {
+                        return None;
+                    }
+                    loop {
+                        match futures::StreamExt::next(&mut events).await {
+                            Some(Ok(SseEvent { event, data })) => {
+                                let data_value = match sse::parse_json(&data) {
+                                    Ok(v) => v,
+                                    Err(e) => {
+                                        done = true;
+                                        return Some((Err(e), (events, acc, done, started)));
+                                    }
+                                };
+                                if let Some(delta) = acc.feed(event.as_deref(), &data_value) {
+                                    return Some((
+                                        Ok(ChatStreamItem::Delta(delta)),
+                                        (events, acc, done, started),
+                                    ));
+                                }
+                                if event.as_deref() == Some("message_stop") {
+                                    done = true;
+                                    break;
+                                }
                             }
-                        };
-                        if let Some(delta) = acc.feed(event.as_deref(), &data_value) {
-                            return Some((
-                                Ok(ChatStreamItem::Delta(delta)),
-                                (events, acc, done, started),
-                            ));
+                            Some(Err(e)) => {
+                                done = true;
+                                let item = graceful_finish(&mut acc, started, Err(e));
+                                return Some((item, (events, acc, done, started)));
+                            }
+                            None => {
+                                done = true;
+                                break;
+                            }
                         }
-                        if event.as_deref() == Some("message_stop") {
-                            done = true;
-                            break;
-                        }
                     }
-                    Some(Err(e)) => {
-                        done = true;
-                        let item = graceful_finish(&mut acc, started, Err(e));
-                        return Some((item, (events, acc, done, started)));
-                    }
-                    None => {
-                        done = true;
-                        break;
-                    }
-                }
-            }
-            let item = graceful_finish(&mut acc, started, Ok(()));
-            Some((item, (events, acc, done, started)))
-        },
-    )))
+                    let item = graceful_finish(&mut acc, started, Ok(()));
+                    Some((item, (events, acc, done, started)))
+                },
+            )));
+        }
+        if degraded {
+            return Err(status_error(resp).await);
+        }
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        let lower = text.to_ascii_lowercase();
+        let strip_thinking =
+            lower.contains("thinking") && request.reasoning != ReasoningLevel::Off;
+        if !strip_thinking {
+            return Err(CoreError::Provider(format!(
+                "HTTP {}: {}",
+                status.as_u16(),
+                truncate_body(&text)
+            )));
+        }
+        payload = wire_anthropic::build_chat_payload(
+            request,
+            wire_anthropic::AnthropicWireOpts {
+                supports_thinking: false,
+            },
+        );
+        if url.contains(":rawStreamPredict") {
+            payload["anthropic_version"] = serde_json::json!("vertex-2023-10-16");
+        }
+        degraded = true;
+    }
 }
 
 /// Gemini streaming chat (`:streamGenerateContent?alt=sse`).
+/// Auth headers are supplied by the caller (`x-goog-api-key` for the native
+/// API, `Authorization: Bearer` on Vertex AI).
 pub(crate) async fn gemini_sse(
     http_client: &reqwest::Client,
     url: String,
-    api_key: &str,
+    headers: Vec<(String, String)>,
     request: &ChatRequest,
 ) -> Result<ChatStream> {
     let payload = gemini::build_payload(request);
-    let headers = vec![("x-goog-api-key".to_string(), api_key.to_string())];
     let body_str = serde_json::to_string(&payload).expect("payload serializes");
     let resp = http::post_stream(http_client, &url, headers, body_str).await?;
     let resp = ensure_success(resp).await?;

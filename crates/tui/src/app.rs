@@ -56,6 +56,7 @@ pub struct HistoryRow {
     pub duration_ms: Option<u64>,
     pub total_tokens: Option<u64>,
     pub total_usd: Option<f64>,
+    pub started_at: Option<String>,
 }
 
 pub struct ActiveRun {
@@ -527,7 +528,14 @@ impl App {
         self.history_detail = None;
         self.history_idx = 0;
         scan_dir_recursive(&self.output_base, 0, &mut self.history);
-        self.history.sort_by(|a, b| b.path.cmp(&a.path));
+        // Newest run first (run dirs are timestamp-prefixed); fall back to
+        // path order for runs without a parseable startedAt.
+        self.history.sort_by(|a, b| {
+            b.started_at
+                .as_deref()
+                .cmp(&a.started_at.as_deref())
+                .then_with(|| b.path.cmp(&a.path))
+        });
     }
 }
 
@@ -557,6 +565,7 @@ fn scan_dir_recursive(dir: &std::path::Path, depth: usize, out: &mut Vec<History
                         duration_ms: v["durationMs"].as_u64(),
                         total_tokens: v["tokens"]["total"].as_u64(),
                         total_usd: v["pricing"]["totalUsd"].as_f64(),
+                        started_at: v["startedAt"].as_str().map(String::from),
                         path: path.clone(),
                     });
                 }

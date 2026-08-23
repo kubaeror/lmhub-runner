@@ -99,7 +99,9 @@ impl RunMetrics {
     }
 }
 
-fn gen_run_id() -> String {
+/// Unique id for one run; also used (first 8 chars) in the run directory
+/// name so statistics.json is traceable to its artifacts on disk.
+pub fn gen_run_id() -> String {
     uuid::Uuid::new_v4().simple().to_string()
 }
 
@@ -219,8 +221,10 @@ pub struct StatisticsDocument {
 /// - reasoning tokens are reported separately and are NOT billed again —
 ///   providers either include them in `output` (Anthropic) or report them
 ///   as details of `output` (OpenAI).
+#[allow(clippy::too_many_arguments)]
 pub fn build_document(
     status: RunStatus,
+    run_id: &str,
     identity: &RunIdentity,
     metrics: &RunMetrics,
     wall_duration: Duration,
@@ -241,7 +245,7 @@ pub fn build_document(
 
     StatisticsDocument {
         status,
-        run_id: gen_run_id(),
+        run_id: run_id.to_string(),
         provider: identity.provider.to_string(),
         provider_type: identity.provider_type.to_string(),
         family: identity.family.to_string(),

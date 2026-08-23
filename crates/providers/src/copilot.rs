@@ -121,7 +121,8 @@ pub async fn run_full_flow(
         return match event {
             DeviceFlowEvent::Authorized { github_token } => {
                 let (token, expires_at) = copilot_token(&github_token).await?;
-                store.lock().unwrap().set_credential(
+                let mut store = store.lock().unwrap();
+                store.set_credential(
                     PROVIDER_ID,
                     StoredCredential {
                         kind: "oauth".into(),
@@ -131,6 +132,9 @@ pub async fn run_full_flow(
                         refresh_token: None,
                     },
                 );
+                // Persist so the token survives restarts; without this the
+                // user would redo the whole device flow every launch.
+                store.save()?;
                 notify("copilot: connected ✔".into());
                 Ok(())
             }

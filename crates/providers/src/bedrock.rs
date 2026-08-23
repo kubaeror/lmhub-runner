@@ -12,6 +12,7 @@
 //! Models.dev / local config; Bedrock has no usable generic listing here.
 
 use crate::credentials;
+use crate::http;
 use crate::sigv4;
 use lmhub_core::{
     ChatRequest, ChatResponse, CoreError, Result, Role, StopReason, ToolCallRequest, Usage,
@@ -267,17 +268,24 @@ pub async fn chat(
         .to_string();
     let path = format!("/model/{}/converse", urlencode(request.model.as_str()));
     let payload = build_payload(request);
-    let body_bytes = serde_json::to_vec(&payload)
+    let body_str = serde_json::to_string(&payload)
         .map_err(|e| CoreError::Other(format!("serialize converse payload: {e}")))?;
+    let payload_hash = sigv4::sha256_hex(body_str.as_bytes());
 
     let started = Instant::now();
-    let resp_builder = match &auth {
-        BedrockAuth::Bearer(token) => http_client.post(&url).bearer_auth(token),
+    let headers: Vec<(String, String)> = match &auth {
+        BedrockAuth::Bearer(token) => vec![
+            ("authorization".to_string(), format!("Bearer {token}")),
+            ("content-type".to_string(), "application/json".to_string()),
+        ],
         BedrockAuth::SigV4 {
             access_key,
             secret_key,
             session_token,
         } => {
+            // Every header listed in SignedHeaders must be present on the
+            // actual request — content-type is signed, so it must be sent
+            // (reqwest does not add one for a raw body).
             let signed = sigv4::sign(
                 &sigv4::SigV4Request {
                     method: "POST",
@@ -289,26 +297,36 @@ pub async fn chat(
                     access_key,
                     secret_key,
                     session_token: session_token.as_deref(),
-                    payload_hash: &sigv4::sha256_hex(&body_bytes),
+                    payload_hash: &payload_hash,
                     extra_headers: &[("content-type", "application/json")],
                 },
                 &sigv4::amz_date_now(),
             );
-            let mut rb = http_client.post(&url).header("host", &host);
-            if let Some(token) = &signed.security_token {
-                rb = rb.header("x-amz-security-token", token);
+            let mut hs = vec![
+                ("host".to_string(), host.clone()),
+                ("content-type".to_string(), "application/json".to_string()),
+                ("x-amz-date".to_string(), signed.amz_date),
+                ("authorization".to_string(), signed.authorization),
+            ];
+            if let Some(token) = signed.security_token {
+                hs.push(("x-amz-security-token".to_string(), token));
             }
-            rb.header("x-amz-date", signed.amz_date)
-                .header("authorization", signed.authorization)
+            hs
         }
     };
 
-    let response = resp_builder
-        .timeout(crate::http::REQUEST_TIMEOUT)
-        .body(body_bytes)
-        .send()
-        .await
-        .map_err(|e| CoreError::Http(lmhub_core::redact::scrub(&e.to_string())))?;
+    // Retries ride on the shared policy (429/5xx with backoff). The signed
+    // headers are reused across attempts; SigV4 signatures stay valid for
+    // the request within the 15-minute clock-skew window, so this is safe.
+    let response = http::send_request(
+        http_client,
+        reqwest::Method::POST,
+        &url,
+        headers,
+        Some(body_str),
+        crate::http::REQUEST_TIMEOUT,
+    )
+    .await?;
     let status = response.status();
     let text = response
         .text()

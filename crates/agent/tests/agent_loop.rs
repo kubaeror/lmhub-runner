@@ -138,11 +138,16 @@ async fn happy_path_writes_full_output_structure() {
     .await
     .unwrap();
 
-    // layout: output/MockFam/mock-1/high/
-    assert_eq!(
-        outcome.run_dir,
-        tmp.path().join("MockFam").join("mock-1").join("high")
-    );
+    // layout: output/MockFam/mock-1/high/{start}-{runid8}/output-modelu/
+    let route = tmp.path().join("MockFam").join("mock-1").join("high");
+    assert!(outcome.run_dir.starts_with(&route));
+    let run_component = outcome
+        .run_dir
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    assert!(run_component.contains('-'), "run dir: {run_component}");
     assert!(outcome.workspace_dir.is_dir());
     assert!(outcome.run_dir.join("statistics.json").is_file());
     assert!(outcome.run_dir.join("events.jsonl").is_file());
@@ -163,6 +168,16 @@ async fn happy_path_writes_full_output_structure() {
     assert_eq!(stats["toolCalls"]["total"], 1);
     assert_eq!(stats["toolCalls"]["successRatio"], 1.0);
     assert_eq!(stats["pricing"]["totalUsd"], serde_json::Value::Null);
+    // statistics.json runId must be traceable to its directory suffix.
+    let run_id = stats["runId"].as_str().unwrap();
+    assert!(
+        run_component.ends_with(&run_id[..8]),
+        "dir {run_component} does not end with {run_id}"
+    );
+    // performance block is populated (two LLM turns, durations recorded).
+    assert_eq!(stats["performance"]["llmRequests"], 2);
+    assert_eq!(stats["performance"]["turns"], 2);
+    assert_eq!(stats["performance"]["maxLlmRequestMs"], 7);
 
     // events.jsonl: parseable JSONL with a successful tool call event
     let events_raw = std::fs::read_to_string(outcome.run_dir.join("events.jsonl")).unwrap();

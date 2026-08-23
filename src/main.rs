@@ -47,7 +47,25 @@ async fn run(
         .unwrap_or_else(|| project_dir.join(".cache"))
         .join("lmhub");
     let config_path = config_dir.join("config.toml");
-    let config = AppConfig::load(&config_path).unwrap_or_default();
+    // A missing config.toml is normal (defaults); a *broken* one is a
+    // user error we refuse to paper over with weaker defaults.
+    let mut config = match AppConfig::load(&config_path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!(
+                "lmhub: no {} — using defaults",
+                config_path.display()
+            );
+            AppConfig::default()
+        }
+        Err(e) => {
+            anyhow::bail!(
+                "{} is invalid: {e} — fix it or delete it to start with defaults",
+                config_path.display()
+            )
+        }
+    };
+    config.sanitize();
 
     lmhub_providers::init_retry_policy(lmhub_providers::http::RetryPolicy {
         max_attempts: config.max_retries.max(1),

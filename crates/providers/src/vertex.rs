@@ -190,7 +190,7 @@ pub async fn chat_stream(
     if variant_anthropic {
         crate::stream_runner::anthropic_sse(http_client, url, headers, request).await
     } else {
-        crate::stream_runner::gemini_sse(http_client, url, &bearer, request).await
+        crate::stream_runner::gemini_sse(http_client, url, headers, request).await
     }
 }
 
