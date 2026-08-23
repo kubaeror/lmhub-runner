@@ -47,7 +47,7 @@ uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.10"
 hmac = "0.12"
-jsonwebtoken = "9"
+jsonwebtoken = "11"
 hex = "0.4"
 dirs = "6"
 ratatui = "0.29"
