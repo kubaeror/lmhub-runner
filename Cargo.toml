@@ -46,7 +46,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.10"
-hmac = "0.12"
+hmac = "0.13"
 jsonwebtoken = "9"
 hex = "0.4"
 dirs = "6"
