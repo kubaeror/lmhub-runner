@@ -85,15 +85,16 @@ pub fn status_line(state: &State) -> String {
 
 pub fn hints(state: &State) -> &'static str {
     match state.screen {
+        // On filter screens `q` types into the filter — quit is Ctrl-C.
         crate::action::Screen::Setup => {
-            "type=search providers  ↑/↓ select  Ctrl-Enter run  ←/→ pane  m multi  Space bulk  F favorite  x bulk-run  F5 models  d set default  : palette  q quit"
+            "type=search providers  ↑/↓ select  Ctrl-Enter run  ←/→ pane  m multi  Space bulk  F favorite  x bulk-run  F5 models  d set default  : palette  Ctrl-C quit"
         }
         crate::action::Screen::Run => {
             "[/] session  ↑/↓ scroll  c cancel  C all  R rerun  v raw feed  Enter detail  : palette  q quit"
         }
         crate::action::Screen::History => "↑/↓ select  Enter detail  F5 rescan  : palette  q quit",
         crate::action::Screen::Reasoning => {
-            "type=filter  ↑/↓ select  D cycle default (★)  Esc clear  F5 reload  : palette  q quit"
+            "type=filter  ↑/↓ select  D cycle default (★)  Esc clear  F5 reload  : palette  Ctrl-C quit"
         }
     }
 }

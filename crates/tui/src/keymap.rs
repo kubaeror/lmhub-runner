@@ -16,7 +16,7 @@ pub fn dispatch(state: &State, key: KeyEvent) -> Option<Action> {
     if key.modifiers.contains(KeyModifiers::CONTROL)
         && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('q'))
     {
-        return Some(Action::Quit);
+        return Some(quit_action(state));
     }
 
     if let Some(modal) = &state.modal {
@@ -24,7 +24,9 @@ pub fn dispatch(state: &State, key: KeyEvent) -> Option<Action> {
     }
 
     match key.code {
-        KeyCode::Char('q') => return Some(Action::Quit),
+        // Bare `q` quits — except in a type-to-filter field (provider
+        // search / reasoning map), where `q` is a filter character.
+        KeyCode::Char('q') if !is_filter_context(state) => return Some(quit_action(state)),
         KeyCode::Char(':') => return Some(Action::OpenPalette),
         KeyCode::Tab => {
             return Some(Action::SwitchScreen(state.screen.cycle(true)));
@@ -37,6 +39,30 @@ pub fn dispatch(state: &State, key: KeyEvent) -> Option<Action> {
         crate::action::Screen::Run => run_keys(key),
         crate::action::Screen::History => history_keys(key),
         crate::action::Screen::Reasoning => reasoning_map_keys(state, key),
+    }
+}
+
+/// Graceful quit, or force-quit when a cancel is already in flight.
+fn quit_action(state: &State) -> Action {
+    let still_running = state
+        .runs
+        .runs
+        .iter()
+        .any(|r| r.status == crate::state::RunSessionStatus::Running);
+    if still_running && state.cancel_requested {
+        Action::ForceQuit
+    } else {
+        Action::Quit
+    }
+}
+
+/// True when the focused context is a type-to-filter field, where printable
+/// characters (including `q`) belong to the filter rather than to the app.
+fn is_filter_context(state: &State) -> bool {
+    match state.screen {
+        crate::action::Screen::Setup => state.setup.focus == Pane::Providers,
+        crate::action::Screen::Reasoning => true,
+        _ => false,
     }
 }
 
@@ -97,6 +123,7 @@ fn setup_keys(state: &State, key: KeyEvent) -> Option<Action> {
             KeyCode::Down => Some(Action::MoveSelection(1)),
             KeyCode::Enter => Some(Action::ConnectProvider),
             KeyCode::Esc => Some(Action::ClearSearch),
+            KeyCode::Backspace => provider_search_backspace(state),
             KeyCode::Char('F') => Some(Action::ToggleFavorite),
             KeyCode::Char(c) => provider_search_char(state, c),
             _ => None,
@@ -123,8 +150,9 @@ fn setup_keys(state: &State, key: KeyEvent) -> Option<Action> {
             _ => None,
         },
         Pane::Task => match key.code {
-            KeyCode::Up => Some(Action::CycleTaskPrompt(1)),
-            KeyCode::Down => Some(Action::CycleTaskPrompt(-1)),
+            // Up/Down must match every other pane: Up moves back, Down forward.
+            KeyCode::Up => Some(Action::CycleTaskPrompt(-1)),
+            KeyCode::Down => Some(Action::CycleTaskPrompt(1)),
             KeyCode::Char('d') => Some(Action::SetDefaultTaskPrompt),
             // Ctrl+Enter runs the selected task prompt — chat-UI convention.
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -141,6 +169,13 @@ fn setup_keys(state: &State, key: KeyEvent) -> Option<Action> {
 fn provider_search_char(state: &State, c: char) -> Option<Action> {
     let mut text = state.setup.provider_filter.clone();
     text.push(c);
+    Some(Action::SearchProviders(text))
+}
+
+/// Backspace in the providers search removes the last filter character.
+fn provider_search_backspace(state: &State) -> Option<Action> {
+    let mut text = state.setup.provider_filter.clone();
+    text.pop();
     Some(Action::SearchProviders(text))
 }
 
@@ -228,9 +263,23 @@ mod tests {
             dispatch(&s, key(KeyCode::Tab)),
             Some(Action::SwitchScreen(crate::action::Screen::Run))
         ));
+        // Ctrl-C quits even from a type-to-filter context (providers pane).
+        assert!(matches!(
+            dispatch(&s, KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Some(Action::Quit)
+        ));
+        // `q` quits from a non-filter screen…
+        s.screen = crate::action::Screen::Run;
         assert!(matches!(
             dispatch(&s, key(KeyCode::Char('q'))),
             Some(Action::Quit)
+        ));
+        // …but on the Setup providers pane it is a search character.
+        s.screen = crate::action::Screen::Setup;
+        s.setup.focus = Pane::Providers;
+        assert!(matches!(
+            dispatch(&s, key(KeyCode::Char('q'))),
+            Some(Action::SearchProviders(text)) if text == "q"
         ));
         s.modal = Some(Modal::EnterKey {
             provider_id: "x".into(),
@@ -261,17 +310,44 @@ mod tests {
     }
 
     #[test]
+    fn provider_search_backspace_edits_filter() {
+        let mut s = state_with();
+        s.setup.focus = Pane::Providers;
+        s.setup.provider_filter = "grok".into();
+        assert!(matches!(
+            dispatch(&s, key(KeyCode::Backspace)),
+            Some(Action::SearchProviders(text)) if text == "gro"
+        ));
+    }
+
+    #[test]
+    fn q_filters_on_reasoning_map() {
+        let mut s = state_with();
+        s.screen = crate::action::Screen::Reasoning;
+        assert!(matches!(
+            dispatch(&s, key(KeyCode::Char('q'))),
+            Some(Action::MapFilter(text)) if text == "q"
+        ));
+        // Uppercase D is still the cycle-default binding.
+        assert!(matches!(
+            dispatch(&s, key(KeyCode::Char('D'))),
+            Some(Action::CycleModelDefault)
+        ));
+    }
+
+    #[test]
     fn task_pane_keys() {
         let mut s = state_with();
         s.setup.focus = Pane::Task;
-        // Up/Down cycle the selected task prompt; Ctrl+Enter starts the run.
+        // Up/Down cycle the selected task prompt — same direction as every
+        // other pane (Up back, Down forward); Ctrl+Enter starts the run.
         assert!(matches!(
             dispatch(&s, key(KeyCode::Up)),
-            Some(Action::CycleTaskPrompt(1))
+            Some(Action::CycleTaskPrompt(-1))
         ));
         assert!(matches!(
             dispatch(&s, key(KeyCode::Down)),
-            Some(Action::CycleTaskPrompt(-1))
+            Some(Action::CycleTaskPrompt(1))
         ));
         assert!(matches!(
             dispatch(&s, key(KeyCode::Char('d'))),

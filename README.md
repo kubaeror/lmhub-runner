@@ -63,12 +63,12 @@ and the concurrency cap persist in `~/.config/lmhub/ui.json`.
 
 | Screen    | Keys                                                                                  |
 |-----------|---------------------------------------------------------------------------------------|
-| Global    | `q`/`Ctrl-C` quit (first press cancels runs, second forces), `:` palette, `Tab` next tab, mouse |
-| Setup     | `←`/`→` pane, type=search providers, `↑`/`↓` select, `Enter` connect/key, `F` favorite, `m` multi-select, `Space` toggle bulk, `C` clear bulk, `x` bulk-run, `F5` force-reload models, `r` reload models, `d` pin reasoning default / default prompt / default task prompt |
+| Global    | `Ctrl-C`/`Ctrl-Q` always quit (first press cancels runs, second forces), `:` palette, `Tab` next tab, mouse |
+| Setup     | `←`/`→` pane, type=search providers (`q` is a filter char here; `Backspace` deletes), `↑`/`↓` select, `Enter` connect/key, `F` favorite, `m` multi-select, `Space` toggle bulk, `C` clear bulk, `x` bulk-run, `F5` force-reload models, `r` reload models, `d` pin reasoning default / default prompt / default task prompt |
 | Task      | `↑`/`↓` select task prompt, `Ctrl+Enter` run, `d` set default task prompt, `x` bulk-run |
 | Run       | `[`/`]` previous/next session, `↑`/`↓` scroll transcript, `c` cancel session, `C` cancel all, `R` rerun, `v` raw feed, `Enter` run detail |
 | History   | `↑`/`↓` select, `Enter` detail, `F5` rescan                                            |
-| Reasoning | type=filter, `↑`/`↓` select, `D` cycle ★ default, `Esc` clear, `F5` reload snapshot   |
+| Reasoning | type=filter (`q` is a filter char), `↑`/`↓` select, `D` cycle ★ default, `Esc` clear, `F5` reload snapshot   |
 
 ### Credentials & prompts
 

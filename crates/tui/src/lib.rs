@@ -228,25 +228,8 @@ fn key_action(state: &mut State, key: KeyEvent) -> Option<Action> {
     if key.kind != KeyEventKind::Press {
         return None;
     }
-    let is_quit = matches!(key.code, crossterm::event::KeyCode::Char('q'))
-        || (key
-            .modifiers
-            .contains(crossterm::event::KeyModifiers::CONTROL)
-            && matches!(
-                key.code,
-                crossterm::event::KeyCode::Char('c') | crossterm::event::KeyCode::Char('q')
-            ));
-    if is_quit {
-        let still_running = state
-            .runs
-            .runs
-            .iter()
-            .any(|r| r.status == state::RunSessionStatus::Running);
-        if still_running && state.cancel_requested {
-            return Some(Action::ForceQuit);
-        }
-        return Some(Action::Quit);
-    }
+    // Quit handling (incl. the q-vs-search decision) lives in
+    // `keymap::dispatch` so it stays in one place.
     crate::dispatch(state, key)
 }
 

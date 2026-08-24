@@ -86,3 +86,80 @@ pub fn mouse_action(state: &State, col: u16, row: u16) -> Option<crate::action::
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::Pane;
+    use ratatui::layout::Rect;
+
+    /// A bare state with the full registry and no prefs — enough for
+    /// `mouse_action`, which only inspects `screen` + `layout`.
+    fn state_with() -> State {
+        let dir = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(std::sync::Mutex::new(lmhub_core::AuthStore::load(
+            dir.path().join("auth.json"),
+        )));
+        let (registry, _) =
+            lmhub_providers::build_registry(dir.path(), std::sync::Arc::clone(&store));
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        State::new(
+            registry,
+            std::sync::Arc::new(lmhub_modelsdev::ModelsDevClient::new(
+                dir.path().join("cache"),
+                std::time::Duration::from_secs(60),
+            )),
+            store,
+            lmhub_sandbox::SandboxRuntime::Legacy,
+            lmhub_core::AppConfig::default(),
+            dir.path().join("config.toml"),
+            Vec::new(),
+            Vec::new(),
+            dir.path().join("output"),
+            tx,
+        )
+    }
+
+    fn rect(x: u16, y: u16, w: u16, h: u16) -> Rect {
+        Rect::new(x, y, w, h)
+    }
+
+    #[test]
+    fn setup_mouse_maps_clickable_panes() {
+        let mut s = state_with();
+        s.screen = Screen::Setup;
+        // Simulate the rects recorded by view::setup::draw: providers left,
+        // models middle, reasoning/prompts/task stacked on the right. The
+        // "Model details" region (right column, top) is NOT a focusable pane.
+        let mut panes = [Rect::default(); 5];
+        panes[0] = rect(0, 0, 40, 30); // Providers
+        panes[1] = rect(40, 0, 40, 30); // Models
+        panes[2] = rect(80, 6, 20, 3); // Reasoning levels
+        panes[3] = rect(80, 9, 20, 7); // System prompts
+        panes[4] = rect(80, 16, 20, 7); // Task prompts
+        s.layout.setup_panes = panes;
+
+        assert!(matches!(
+            mouse_action(&s, 10, 10),
+            Some(crate::action::Action::FocusPane(Pane::Providers))
+        ));
+        assert!(matches!(
+            mouse_action(&s, 50, 10),
+            Some(crate::action::Action::FocusPane(Pane::Models))
+        ));
+        assert!(matches!(
+            mouse_action(&s, 85, 7),
+            Some(crate::action::Action::FocusPane(Pane::Reasoning))
+        ));
+        assert!(matches!(
+            mouse_action(&s, 85, 12),
+            Some(crate::action::Action::FocusPane(Pane::Prompts))
+        ));
+        assert!(matches!(
+            mouse_action(&s, 85, 20),
+            Some(crate::action::Action::FocusPane(Pane::Task))
+        ));
+        // Clicking the read-only "Model details" region focuses nothing.
+        assert!(mouse_action(&s, 85, 3).is_none());
+    }
+}

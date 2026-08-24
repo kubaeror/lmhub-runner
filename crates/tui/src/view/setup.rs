@@ -31,13 +31,15 @@ pub fn draw(f: &mut Frame, state: &mut State, area: ratatui::layout::Rect) {
         ])
         .split(cols[2]);
 
-    // Layout cache for mouse clicks (indices match Pane::ORDER).
+    // Layout cache for mouse clicks (indices match Pane::ORDER). right[0]
+    // ("Model details") is a read-only info pane — deliberately not
+    // focusable, so it maps to no Pane and stays at its default zero rect.
     let mut panes = state.layout.setup_panes;
-    panes[0] = cols[0];
-    panes[1] = cols[1];
-    panes[2] = right[0];
-    panes[3] = right[1];
-    panes[4] = right[2];
+    panes[0] = cols[0]; // Pane::Providers
+    panes[1] = cols[1]; // Pane::Models
+    panes[2] = right[1]; // Pane::Reasoning (reasoning levels)
+    panes[3] = right[2]; // Pane::Prompts (system prompts)
+    panes[4] = right[3]; // Pane::Task (task prompts)
     state.layout.setup_panes = panes;
 
     draw_providers(f, state, cols[0]);
