@@ -1,0 +1,28 @@
+ [1] Setup │ [2] Run │ [3] History │ [4] Reasoning                                                  
+┌ Previous runs — family/model/reasoning/status/ms/tokens/$ (Enter = statistics) ──────────────────┐
+│GPT        gpt-4o                       high    completed       60000ms  tokens 12000      0.00123│
+│GPT        gpt-4o-mini                  high    cancelled       60000ms  tokens 12000      null   │
+│GPT        gpt-4.1                      high    timeout         60000ms  tokens 12000      0.50000│
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+  ↑/↓ select  Enter detail  F5 rescan  : palette  q quit                                            

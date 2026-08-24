@@ -1,0 +1,28 @@
+ [1] Setup │ [2] Run │ [3] History │ [4] Reasoning                                                  
+ filter: sonnet▏  — 1 models · 1 providers                                                          
+┌ Reasoning map — all models (D = cycle default, F5 = reload) ─────────────────────────────────────┐
+│── anthropic ──                                                                                   │
+│  claude-3-7-sonnet                        off low high★                                          │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+  type=filter  ↑/↓ select  D cycle default (★)  Esc clear  F5 reload  : palette  Ctrl-C quit        

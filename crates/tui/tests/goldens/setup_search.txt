@@ -1,0 +1,28 @@
+ [1] Setup │ [2] Run │ [3] History │ [4] Reasoning                                                  
+ search: grok▏  — 1 match       ┌ Models [Models.dev] ─────────────┐┌ Model details ───────────────┐
+┌ Providers ───────────────────┐│GPT-4o                            ││model   gpt-4o                │
+│Groq [no key]                 ││GPT-4o mini                       ││family  GPT                   │
+│                              ││GPT-4.1                           ││✔ tools   ✔ reasoning   ✔     │
+│                              ││                                  ││cache                         │
+│                              ││                                  ││context 128000 / output 16384 │
+│                              ││                                  ││tokens                        │
+│                              ││                                  ││pricing: not found in         │
+│                              ││                                  │└──────────────────────────────┘
+│                              ││                                  │┌ Reasoning (★default, d=set) ─┐
+│                              ││                                  ││[off] [low] [high★]           │
+│                              ││                                  │└──────────────────────────────┘
+│                              ││                                  │┌ System prompts (d=set default┐
+│                              ││                                  ││▶ default                     │
+│                              ││                                  ││  expert                      │
+│                              ││                                  ││                              │
+│                              ││                                  ││                              │
+│                              ││                                  ││                              │
+│                              ││                                  │└──────────────────────────────┘
+│                              ││                                  │┌ Task prompts (Ctrl-Enter = RU┐
+│                              ││                                  ││  build                       │
+│                              ││                                  ││▶ refactor                    │
+│                              ││                                  ││                              │
+│                              ││                                  ││                              │
+│                              ││                                  ││                              │
+└──────────────────────────────┘└──────────────────────────────────┘└──────────────────────────────┘
+  type=search providers  ↑/↓ select  Ctrl-Enter run  ←/→ pane  m multi  Space bulk  F favorite  x bu

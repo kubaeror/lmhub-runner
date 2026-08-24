@@ -1,0 +1,28 @@
+ [1] Setup │ [2] Run │ [3] History │ [4] Reasoning                                                  
+┌ Sessions ([/]) ──────────┐┌ run #1 — transcript (v=raw) ─────────────────────────────────────────┐
+│▶ #1 gpt-4o [high] done   ││── turn 1  · 1200 ms · stop tool_call                                 │
+│              ┌ run #1 — gpt-4o (Esc closes) ──────────────────────────────────────┐de where th   │
+│              │provider : openai                                                   │              │
+│              │model    : gpt-4o                                                   │              │
+│              │reasoning: high                                                     │              │
+│              │task     : refactor the codebase                                    │              │
+│              │                                                                    │ suite…       │
+│              │■ completed — cost 0.001234 USD — statistics:                       │              │
+│              │/tmp/out/GPT/gpt-4o/high/2026-08-24T00-00-00-12345678/statistics.jso│              │
+│              │n                                                                   │              │
+│              │                                                                    │              │
+│              │run dir  : /tmp/out/GPT/gpt-4o/high/2026-08-24T00-00-00-12345678    │              │
+│              │                                                                    │              │
+│              │final answer:                                                       │              │
+│              │Done. All tests pass and the build is green.                        │              │
+│              │                                                                    │              │
+│              │                                                                    │              │
+│              │                                                                    │              │
+│              └────────────────────────────────────────────────────────────────────┘              │
+│                          ││                                                                      │
+│                          ││                                                                      │
+│                          ││                                                                      │
+└──────────────────────────┘└──────────────────────────────────────────────────────────────────────┘
+ openai gpt-4o [high] · 0s · tok in 4218 out 8930 · cache-hit 0.4267 · tools ✔4 ✘1 · err 1 warn 2 · 
+ ■ completed — cost 0.001234 USD — statistics: /tmp/out/GPT/gpt-4o/high/2026-08-24T00-00-00-1234567 
+openai gpt-4o [high] — running 0s (done)   [/] session  ↑/↓ scroll  c cancel  C all  R rerun  v raw 

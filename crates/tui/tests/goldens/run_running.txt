@@ -1,0 +1,28 @@
+ [1] Setup │ [2] Run │ [3] History │ [4] Reasoning                                                  
+┌ Sessions ([/]) ──────────┐┌ run #2 — transcript (v=raw) ─────────────────────────────────────────┐
+│  #1 gpt-4o [high] done   ││── turn 1                                                             │
+│▶ #2 gpt-4o-mini [high] 0s││Streaming a long answer about the refactor plan…                      │
+│                          ││streaming… (57 deltas)                                                │
+│                          ││Streaming a long answer about the refactor plan…                      │
+│                          ││                                                                      │
+│                          ││                                                                      │
+│                          ││                                                                      │
+│                          ││                                                                      │
+│                          ││                                                                      │
+│                          ││                                                                      │
+│                          ││                                                                      │
+│                          ││                                                                      │
+│                          ││                                                                      │
+│                          ││                                                                      │
+│                          ││                                                                      │
+│                          ││                                                                      │
+│                          ││                                                                      │
+│                          ││                                                                      │
+│                          ││                                                                      │
+│                          ││                                                                      │
+│                          ││                                                                      │
+│                          ││                                                                      │
+└──────────────────────────┘└──────────────────────────────────────────────────────────────────────┘
+ openai gpt-4o-mini [high] · 0s · tok in 300 out 57 · cache-hit 0.0000 · tools ✔0 ✘0 · err 0 warn 0 
+ streaming… (57 deltas)                                                                             
+openai gpt-4o-mini [high] — running 0s   [/] session  ↑/↓ scroll  c cancel  C all  R rerun  v raw fe

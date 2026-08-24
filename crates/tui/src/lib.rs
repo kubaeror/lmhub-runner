@@ -26,6 +26,8 @@ mod transcript;
 mod view;
 
 #[cfg(test)]
+mod goldens;
+#[cfg(test)]
 mod testutil;
 
 pub use action::Action;

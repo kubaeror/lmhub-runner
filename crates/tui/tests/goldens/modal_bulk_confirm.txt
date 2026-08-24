@@ -1,0 +1,28 @@
+ [1] Setup │ [2] Run │ [3] History │ [4] Reasoning                                                  
+ search: ▏                      ┌ Models [Models.dev] ☑ 2──────────┐┌ Model details ───────────────┐
+┌ Providers ───────────────────┐│GPT-4o                            ││model   gpt-4o                │
+│── NATIVE ──         ┌ Bulk launch — 2 runs (y/Enter = launch) ────────────┐GPT                   │
+│Amazon Bedrock [no ke│─ openai                                             │  ✔ reasoning   ✔     │
+│Anthropic [no key]   │  • gpt-4o                                           │                      │
+│Azure [no key]       │  • gpt-4o-mini                                      │128000 / output 16384 │
+│Azure Cognitive Servi│                                                     │                      │
+│Cohere [no key]      │pricing unknown for these routes — costs will be null│ not found in         │
+│GitHub Copilot [no ke│                                                     │──────────────────────┘
+│GitLab Duo [no key]  │                                                     │ng (★default, d=set) ─┐
+│Google [no key]      │                                                     │ow] [high★]           │
+│OpenAI [no key] ☑2   │                                                     │──────────────────────┘
+│Vertex [no key]      │                                                     │prompts (d=set default┐
+│Vertex (Anthropic) [n│                                                     │t                     │
+│watsonx.ai [no key]  │                                                     │                      │
+│── ROUTED ──         └─────────────────────────────────────────────────────┘                      │
+│302.AI [no key]               ││                                  ││                              │
+│Abacus [no key]               ││                                  ││                              │
+│abliteration.ai [no key]      ││                                  │└──────────────────────────────┘
+│ai& [no key]                  ││                                  │┌ Task prompts (Ctrl-Enter = RU┐
+│AI-ROUTER [no key]            ││                                  ││  build                       │
+│AIHubMix [no key]             ││                                  ││▶ refactor                    │
+│AKI.IO [no key]               ││                                  ││                              │
+│Alibaba [no key]              ││                                  ││                              │
+│Alibaba (China) [no key]      ││                                  ││                              │
+└──────────────────────────────┘└──────────────────────────────────┘└──────────────────────────────┘
+  type=search providers  ↑/↓ select  Ctrl-Enter run  ←/→ pane  m multi  Space bulk  F favorite  x bu
