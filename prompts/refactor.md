@@ -9,7 +9,7 @@ Rules:
 - Work only inside the workspace; escaping it is blocked and logged.
 - Use only the provided tools (read_file/write_file/edit_file/list_directory/
   create_directory/run_command/read_command_output).
-- Only allowlisted commands may run (e.g. node/npm/npx), passed as argv arrays;
+- Only allowlisted commands may run (e.g. node, npm, git, grep, python3), passed as argv arrays;
   no shell features (pipes/redirections) exist.
 - After each meaningful change, verify behavior by running the program or its
   tests with run_command and reading real output with read_command_output.

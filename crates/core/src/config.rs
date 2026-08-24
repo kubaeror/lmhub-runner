@@ -37,6 +37,15 @@ pub struct AppConfig {
     pub sandbox: String,
 }
 
+/// Default command allowlist: common developer tooling a coding agent needs
+/// in the workspace jail. Everything here runs via argv arrays (no shell);
+/// a missing binary fails per-command, never silently.
+pub const DEFAULT_ALLOWED_COMMANDS: &[&str] = &[
+    "awk", "cat", "chmod", "cp", "curl", "cut", "diff", "echo", "find", "git", "grep", "head",
+    "jq", "ls", "make", "mkdir", "mv", "node", "npm", "npx", "pnpm", "python3", "rm", "sed",
+    "sort", "tail", "tar", "tee", "touch", "uniq", "wc", "wget", "xargs",
+];
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -45,7 +54,10 @@ impl Default for AppConfig {
             run_timeout_secs: 900,
             max_turns: 30,
             command_timeout_secs: 90,
-            allowed_commands: vec!["node".into(), "npm".into(), "npx".into(), "pnpm".into()],
+            allowed_commands: DEFAULT_ALLOWED_COMMANDS
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
             modelsdev_ttl_secs: 86_400,
             max_output_tokens: 16_384,
             read_file_max_bytes: 48_000,
@@ -105,7 +117,10 @@ impl AppConfig {
             .collect();
         if cleaned.is_empty() && !self.allowed_commands.is_empty() {
             tracing::warn!("allowed_commands empty or all-blank; restoring defaults");
-            self.allowed_commands = vec!["node".into(), "npm".into(), "npx".into(), "pnpm".into()];
+            self.allowed_commands = DEFAULT_ALLOWED_COMMANDS
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
         } else {
             self.allowed_commands = cleaned;
         }
@@ -172,6 +187,12 @@ mod tests {
             ..AppConfig::default()
         };
         cfg.sanitize();
-        assert_eq!(cfg.allowed_commands, vec!["node", "npm", "npx", "pnpm"]);
+        assert_eq!(
+            cfg.allowed_commands,
+            DEFAULT_ALLOWED_COMMANDS
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        );
     }
 }

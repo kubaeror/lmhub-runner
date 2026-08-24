@@ -82,9 +82,9 @@ pub fn tool_specs() -> Vec<ToolSpec> {
         ToolSpec {
             name: "run_command".into(),
             description: "Run an ALLOWLISTED command inside the workspace. Only specific \
-                          commands are available (e.g. node/npm/npx); arbitrary binaries and \
-                          shells are rejected. Pass argv as an array of strings — no shell \
-                          syntax, no pipes/redirects. Output is captured; retrieve it with \
+                          commands are available (e.g. node, npm, git, grep, python3); arbitrary \
+                          binaries and shells are rejected. Pass argv as an array of strings — no \
+                          shell syntax, no pipes/redirects. Output is captured; retrieve it with \
                           read_command_output.\
                           \nExample: {\"argv\": [\"node\", \"--version\"]}"
                 .into(),

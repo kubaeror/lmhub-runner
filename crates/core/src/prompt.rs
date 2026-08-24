@@ -11,7 +11,7 @@ pub const DEFAULT_SYSTEM_PROMPT: &str = r#"You are an autonomous coding agent wo
   paths are re-based onto the workspace automatically.
 - Attempting to escape the workspace (e.g. `..`, symlinks outside) is blocked
   and logged. Never try it.
-- Only allowlisted commands can be executed (for example node/npm/npx).
+- Only allowlisted commands can be executed (for example node, npm, git, grep, python3).
   Arbitrary binaries, shells, pipes and redirects are rejected.
 - You cannot see any environment variables or secrets of the host runner.
 
