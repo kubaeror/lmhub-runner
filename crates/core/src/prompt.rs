@@ -11,8 +11,9 @@ pub const DEFAULT_SYSTEM_PROMPT: &str = r#"You are an autonomous coding agent wo
   paths are re-based onto the workspace automatically.
 - Attempting to escape the workspace (e.g. `..`, symlinks outside) is blocked
   and logged. Never try it.
-- Only allowlisted commands can be executed (for example node, npm, git, grep, python3).
-  Arbitrary binaries, shells, pipes and redirects are rejected.
+- Only allowlisted commands can be executed — the exact list is in the
+  "Available commands" section appended to this prompt. Arbitrary binaries,
+  shells, pipes and redirects are rejected.
 - You cannot see any environment variables or secrets of the host runner.
 
 # How to work
@@ -31,6 +32,44 @@ pub const DEFAULT_SYSTEM_PROMPT: &str = r#"You are an autonomous coding agent wo
    built and how to run it. Do not ask follow-up questions.
 
 Be efficient: avoid unnecessary re-reads, keep files reasonably sized."#;
+
+/// Append the *effective* command allowlist and workspace path rules to a
+/// system prompt. Prompt files are static and config-agnostic, so they can
+/// only say "some commands are allowed"; the real list lives in `AppConfig`.
+/// Injecting it right before the request is sent guarantees the model sees
+/// exactly what the sandbox will accept — and explicitly what it will
+/// reject (`pwd`-style orientation commands are in the list, host absolute
+/// paths never resolve inside the jail). Empty allowlists append nothing;
+/// the prompt is returned untouched.
+pub fn augment_system_prompt(system_prompt: &str, allowed_commands: &[String]) -> String {
+    if allowed_commands.is_empty() {
+        return system_prompt.to_string();
+    }
+    let mut out = String::with_capacity(system_prompt.len() + 512);
+    out.push_str(system_prompt);
+    out.push_str("\n\n## Available commands\n\n");
+    out.push_str(
+        "`run_command` accepts exactly these programs (bare argv[0] match, no shell, no pipes, \
+         no redirects):\n\n",
+    );
+    for cmd in allowed_commands {
+        out.push_str(&format!("- `{cmd}`\n"));
+    }
+    out.push_str("\nPath rules (strict):\n");
+    out.push_str(
+        "- All paths are relative to the workspace root; `.home` is your sandboxed HOME.\n",
+    );
+    out.push_str(
+        "- Absolute paths are re-based onto the workspace. Host paths such as `/home/...`, \
+         `/tmp`, `/usr` never exist inside the sandbox — using them yields `No such file or \
+         directory`.\n",
+    );
+    out.push_str(
+        "- `run_command` requires `argv`: a non-empty JSON array of strings, e.g. \
+         `[\"node\", \"--version\"]`. A call without `argv` is rejected.\n",
+    );
+    out
+}
 
 /// Load a prompt file; fall back to the built-in prompt on any failure
 /// (missing file, unreadable, invalid UTF-8).
@@ -76,5 +115,23 @@ mod tests {
         let p = load_task_prompt(Path::new("/nonexistent/task.md"));
         assert_eq!(p, DEFAULT_TASK_PROMPT);
         assert_ne!(p, DEFAULT_SYSTEM_PROMPT);
+    }
+
+    #[test]
+    fn augment_appends_allowlist_and_rules() {
+        let base = "you are an agent.";
+        let cmds = ["node".to_string(), "pwd".to_string()];
+        let out = augment_system_prompt(base, &cmds);
+        assert!(out.starts_with(base));
+        assert!(out.contains("`node`"));
+        assert!(out.contains("`pwd`"));
+        assert!(out.contains("re-based onto the workspace"));
+        assert!(out.contains("requires `argv`"));
+    }
+
+    #[test]
+    fn augment_empty_allowlist_is_identity() {
+        let base = "you are an agent.";
+        assert_eq!(augment_system_prompt(base, &[]), base);
     }
 }

@@ -42,7 +42,7 @@ pub struct AppConfig {
 /// a missing binary fails per-command, never silently.
 pub const DEFAULT_ALLOWED_COMMANDS: &[&str] = &[
     "awk", "cat", "chmod", "cp", "curl", "cut", "diff", "echo", "find", "git", "grep", "head",
-    "jq", "ls", "make", "mkdir", "mv", "node", "npm", "npx", "pnpm", "python3", "rm", "sed",
+    "jq", "ls", "make", "mkdir", "mv", "node", "npm", "npx", "pnpm", "pwd", "python3", "rm", "sed",
     "sort", "tail", "tar", "tee", "touch", "uniq", "wc", "wget", "which", "xargs",
 ];
 

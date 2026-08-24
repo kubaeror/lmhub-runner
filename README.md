@@ -171,7 +171,7 @@ The model can only affect its `model-output/` directory:
   (including dangling symlinks on write paths), absolute paths are re-based
   onto the workspace.
 - **Commands**: only allowlisted binaries (default: `node`, `npm`, `npx`,
-  `pnpm`, `python3`, `git`, `make`, `grep`, `sed`, `awk`, `cat`, `ls`,
+  `pnpm`, `pwd`, `python3`, `git`, `make`, `grep`, `sed`, `awk`, `cat`, `ls`,
   `find`, `wc`, `sort`, `head`, `tail`, `cut`, `uniq`, `diff`, `tar`,
   `curl`, `wget`, `jq`, `echo`, `mkdir`, `rm`, `cp`, `mv`, `touch`, `tee`,
   `xargs`, `which`, `chmod`),
@@ -290,7 +290,7 @@ default_task_prompt = "build"
 run_timeout_secs = 900        # wall-clock deadline per run
 max_turns = 30                # agent loop cap
 command_timeout_secs = 90     # per run_command invocation
-allowed_commands = ["node", "npm", "npx", "pnpm", "python3", "git", "make", "grep", "sed", "awk", "cat", "ls", "find", "wc", "sort", "head", "tail", "cut", "uniq", "diff", "tar", "curl", "wget", "jq", "echo", "mkdir", "rm", "cp", "mv", "touch", "tee", "xargs", "which", "chmod"]
+allowed_commands = ["node", "npm", "npx", "pnpm", "pwd", "python3", "git", "make", "grep", "sed", "awk", "cat", "ls", "find", "wc", "sort", "head", "tail", "cut", "uniq", "diff", "tar", "curl", "wget", "jq", "echo", "mkdir", "rm", "cp", "mv", "touch", "tee", "xargs", "which", "chmod"]
 modelsdev_ttl_secs = 86400
 max_output_tokens = 16384
 read_file_max_bytes = 48000

@@ -247,13 +247,19 @@ async fn run_loop(
 ) -> Result<LoopExit, CoreError> {
     let mut messages: Vec<ChatMessage> = vec![ChatMessage::user(spec.task.clone())];
 
+    // The static prompt cannot know the configured command allowlist; append
+    // the effective list (and path rules) so the model never guesses what
+    // the sandbox accepts.
+    let system_prompt =
+        lmhub_core::augment_system_prompt(&spec.system_prompt, &spec.sandbox.allowed_commands);
+
     for turn in 1..=spec.max_turns.max(1) {
         if spec.cancel.is_cancelled() {
             return Err(CoreError::Cancelled);
         }
         sink.emit(&RunEvent::TurnStarted { ts: now_ts(), turn });
 
-        let request = ChatRequest::new(spec.model.id.clone(), spec.system_prompt.clone())
+        let request = ChatRequest::new(spec.model.id.clone(), system_prompt.clone())
             .with_tools(tool_specs())
             .with_messages(messages.clone())
             .with_reasoning(reasoning)

@@ -425,6 +425,15 @@ impl ToolRuntime {
             .get("offset_line")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
+        // Directories open "successfully" on some platforms but fail on
+        // read with a bare EISDIR; steer the model toward the right tool.
+        if path.is_dir() {
+            return ToolOutcome::fail(
+                format!("cannot read {raw:?}: it is a directory, use list_directory instead"),
+                json!({}),
+                false,
+            );
+        }
         let mut file = match tokio::fs::File::open(&path).await {
             Ok(f) => f,
             Err(e) => {
@@ -1198,7 +1207,9 @@ impl ToolRuntime {
             })
         else {
             return ToolOutcome::fail(
-                "missing required argument `argv` (array of strings)".to_string(),
+                "missing required argument `argv` (array of strings) — pass e.g. \
+                 {\"argv\": [\"node\", \"--version\"]}; a bare `cmd` string is not accepted"
+                    .to_string(),
                 json!({}),
                 false,
             );
