@@ -84,6 +84,12 @@ pub(crate) async fn openai_sse(
                     loop {
                         match futures::StreamExt::next(&mut events).await {
                             Some(Ok(SseEvent { data, .. })) => {
+                                if data.trim().is_empty() {
+                                    // Comment/keep-alive-only block — not an
+                                    // event (would otherwise fail JSON parsing
+                                    // and abort a healthy stream).
+                                    continue;
+                                }
                                 if data.trim() == "[DONE]" {
                                     done = true;
                                     break;
@@ -298,6 +304,10 @@ pub(crate) async fn gemini_sse(
             loop {
                 match futures::StreamExt::next(&mut events).await {
                     Some(Ok(SseEvent { data, .. })) => {
+                        if data.trim().is_empty() {
+                            // Comment/keep-alive-only block — not an event.
+                            continue;
+                        }
                         let chunk = match sse::parse_json(&data) {
                             Ok(v) => v,
                             Err(e) => {

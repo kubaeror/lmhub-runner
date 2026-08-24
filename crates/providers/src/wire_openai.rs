@@ -302,6 +302,10 @@ mod tests {
         ));
         assert!(!is_reasoning_rejection("stream_options is not supported"));
         assert!(!is_reasoning_rejection("invalid api key"));
+        // opencode gateway wording: free-tier models only accept no_think/low/high.
+        assert!(is_reasoning_rejection(
+            "The request is invalid: reasoning_effort must be one of: no_think, low, high. Please adjust your request."
+        ));
     }
 
     #[test]
@@ -319,6 +323,11 @@ mod tests {
             None
         );
         assert_eq!(suggested_reasoning_level(""), None);
+        // opencode wording: earliest named level wins (low before high).
+        assert_eq!(
+            suggested_reasoning_level("reasoning_effort must be one of: no_think, low, high"),
+            Some(ReasoningLevel::Low)
+        );
     }
 }
 
@@ -454,7 +463,12 @@ impl OpenAiStreamAccumulator {
     /// Assemble the final response (call when the stream ends).
     pub fn finish(mut self, duration_ms: u64) -> Result<ChatResponse> {
         if self.usage.total() == 0 && self.text.is_empty() && self.tools.is_empty() {
-            return Err(CoreError::Parse("stream ended without any content".into()));
+            return Err(CoreError::Parse(
+                "provider returned an empty stream (no tokens or tool calls) — usually a rate \
+                 limit, an unavailable model, or a reasoning level the model rejects; check the \
+                 provider's quota and the requested reasoning level"
+                    .into(),
+            ));
         }
         let mut warnings = Vec::new();
         let tool_calls = self

@@ -4,6 +4,12 @@
 //! multi-line `data` joined with `\n`, comment lines starting with `:`, and
 //! the OpenAI-style `data: [DONE]` sentinel (passed through verbatim —
 //! protocol layers decide what it means).
+//!
+//! Some gateways answer streaming requests with a **bare JSON error object**
+//! (no SSE framing) even on 2xx status codes — typically rate limits or
+//! unavailable models. Such lines are surfaced as [`CoreError::Provider`]
+//! errors instead of being silently dropped, so protocol layers can degrade
+//! (e.g. on reasoning rejections) or at least report a readable message.
 
 use futures::StreamExt;
 use lmhub_core::{CoreError, Result};
@@ -29,13 +35,13 @@ pub(crate) fn sse_events(
         |mut state| async move {
             loop {
                 if let Some(event) = take_event(&mut state.buf) {
-                    return Some((Ok(event), state));
+                    return Some((event, state));
                 }
                 if state.eof {
                     // Flush a trailing unterminated block only if it ends at
                     // a line boundary; a cut-off mid-line tail is dropped.
                     if let Some(event) = take_final(&mut state.buf) {
-                        return Some((Ok(event), state));
+                        return Some((event, state));
                     }
                     return None;
                 }
@@ -79,7 +85,7 @@ fn redact_safe(s: &str) -> String {
 }
 
 /// Extract one complete event block (terminated by a blank line) if present.
-fn take_event(buf: &mut Vec<u8>) -> Option<SseEvent> {
+fn take_event(buf: &mut Vec<u8>) -> Option<Result<SseEvent>> {
     for sep in [&b"\r\n\r\n"[..], &b"\n\n"[..]] {
         if let Some(pos) = find(buf, sep) {
             let block: Vec<u8> = buf.drain(..pos + sep.len()).collect();
@@ -90,7 +96,7 @@ fn take_event(buf: &mut Vec<u8>) -> Option<SseEvent> {
     None
 }
 
-fn take_final(buf: &mut Vec<u8>) -> Option<SseEvent> {
+fn take_final(buf: &mut Vec<u8>) -> Option<Result<SseEvent>> {
     if buf.is_empty() {
         return None;
     }
@@ -105,7 +111,7 @@ fn take_final(buf: &mut Vec<u8>) -> Option<SseEvent> {
     Some(block_to_event(&text))
 }
 
-fn block_to_event(block: &str) -> SseEvent {
+fn block_to_event(block: &str) -> Result<SseEvent> {
     let mut event = None;
     let mut data_lines: Vec<&str> = Vec::new();
     for line in block.lines() {
@@ -117,12 +123,39 @@ fn block_to_event(block: &str) -> SseEvent {
             event = Some(rest.trim_start_matches(' ').to_string());
         } else if let Some(rest) = line.strip_prefix("data:") {
             data_lines.push(rest.strip_prefix(' ').unwrap_or(rest));
+        } else if let Some(msg) = inline_error(line) {
+            // A non-SSE line carrying a JSON error object: some gateways
+            // answer streaming requests with a bare JSON error body even on
+            // 2xx (rate limits, unavailable models, upstream failures).
+            return Err(CoreError::Provider(msg));
         }
     }
-    SseEvent {
+    Ok(SseEvent {
         event,
         data: data_lines.join("\n"),
+    })
+}
+
+/// If `line` is a bare JSON object with an `error` field, return a readable
+/// provider message (scrubbed, truncated).
+fn inline_error(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if !trimmed.starts_with('{') {
+        return None;
     }
+    let v: Value = serde_json::from_str(trimmed).ok()?;
+    let err = v.get("error")?;
+    let msg = err
+        .get("message")
+        .and_then(|m| m.as_str())
+        .map(String::from)
+        .or_else(|| {
+            err.get("type")
+                .and_then(|t| t.as_str())
+                .map(|t| format!("provider error: {t}"))
+        })
+        .unwrap_or_else(|| "provider returned an error object".to_string());
+    Some(redact_safe(&truncate(&msg)))
 }
 
 /// Parse one SSE `data` payload as JSON (convenience for protocol layers).
@@ -203,6 +236,53 @@ mod tests {
         let big = "data: ".repeat(1_000_000); // ~6 MiB, no blank line
         let events: Vec<Result<SseEvent>> = sse_events(stream_of(vec![big])).collect().await;
         assert!(matches!(events.as_slice(), [Err(CoreError::Http(_))]));
+    }
+
+    #[tokio::test]
+    async fn bare_json_error_body_surfaces_as_provider_error() {
+        // Some gateways answer streaming requests with a bare JSON error
+        // object on 2xx (rate limits, unavailable models).
+        let body = stream_of(vec![
+            "{\"type\":\"error\",\"error\":{\"type\":\"FreeUsageLimitError\",\"message\":\"Rate limit exceeded. Please try again later.\"}}\n\n".to_string(),
+        ]);
+        let events: Vec<Result<SseEvent>> = sse_events(body).collect().await;
+        assert_eq!(events.len(), 1);
+        let Err(CoreError::Provider(msg)) = &events[0] else {
+            panic!("expected provider error, got {:?}", events[0]);
+        };
+        assert!(
+            msg.contains("Rate limit exceeded"),
+            "message must carry the gateway's reason: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn error_object_inside_data_is_still_a_normal_event() {
+        // Framed errors (`data: {...}`) stay data payloads — protocol layers
+        // decide what they mean.
+        let body = stream_of(vec![
+            "data: {\"error\":{\"message\":\"boom\"}}\n\ndata: [DONE]\n\n".to_string(),
+        ]);
+        let events: Vec<Result<SseEvent>> = sse_events(body).collect().await;
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events[0].as_ref().unwrap().data,
+            "{\"error\":{\"message\":\"boom\"}}"
+        );
+    }
+
+    #[tokio::test]
+    async fn keep_alive_only_body_yields_empty_data_events() {
+        // Comment-only blocks parse to empty-data events (never parse
+        // errors); protocol layers skip them.
+        let body = stream_of(vec![
+            ": keep-alive\n\n: keep-alive\n\ndata: y\n\n".to_string()
+        ]);
+        let events: Vec<Result<SseEvent>> = sse_events(body).collect().await;
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].as_ref().unwrap().data, "");
+        assert_eq!(events[1].as_ref().unwrap().data, "");
+        assert_eq!(events[2].as_ref().unwrap().data, "y");
     }
 
     #[test]
