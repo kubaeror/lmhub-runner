@@ -1,7 +1,6 @@
 //! Run screen: session list, live transcript (structured or raw feed),
 //! per-session stats bar.
 
-use crate::pricing;
 use crate::state::{RunSession, RunSessionStatus, State};
 use crate::view::shared::*;
 use ratatui::{
@@ -12,7 +11,7 @@ use ratatui::{
     Frame,
 };
 
-pub fn draw(f: &mut Frame, state: &mut State, area: Rect) {
+pub fn draw(f: &mut Frame, state: &State, area: Rect, panes: &mut [Rect; 2]) {
     if state.runs.runs.is_empty() {
         f.render_widget(
             Paragraph::new(
@@ -32,8 +31,8 @@ pub fn draw(f: &mut Frame, state: &mut State, area: Rect) {
         .constraints([Constraint::Length(28), Constraint::Min(1)])
         .split(chunks[0]);
 
-    state.layout.run_panes[0] = cols[0];
-    state.layout.run_panes[1] = cols[1];
+    panes[0] = cols[0];
+    panes[1] = cols[1];
 
     draw_sessions(f, state, cols[0]);
     draw_transcript(f, state, cols[1]);
@@ -226,9 +225,10 @@ fn draw_stats(f: &mut Frame, state: &State, area: Rect) {
     let cost = run
         .pricing
         .as_ref()
-        .map(|p| format!("{:.6} USD", pricing::estimate_cost(p, u)))
+        .map(|p| format!("{:.6} USD", p.estimate_cost(u)))
         .unwrap_or_else(|| "null".into());
-    let hit = pricing::cache_hit_ratio(u)
+    let hit = u
+        .cache_hit_ratio()
         .map(|r| format!("{r:.4}"))
         .unwrap_or_else(|| "null".into());
     let row0 = Line::from(vec![

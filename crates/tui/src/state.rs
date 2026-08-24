@@ -2,9 +2,10 @@
 //! state transitions returning effects) in `reduce.rs`.
 
 use crate::history::HistoryRow;
+use crate::input::EditField;
 use crate::provider_search::{group_of, Group};
 use crate::transcript::Transcript;
-use crate::{PromptFile, UiMsg};
+use crate::{PromptFile, TuiContext, UiMsg};
 use lmhub_core::{
     AppConfig, ModelCatalog, ModelInfo, ModelListSource, ModelPricing, PricingContext, Provider,
     ReasoningLevel, RunEvent, Usage,
@@ -23,9 +24,12 @@ use tokio_util::sync::CancellationToken;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Modal {
     /// Typing an API key for `provider_id`.
-    EnterKey { provider_id: String, input: String },
+    EnterKey {
+        provider_id: String,
+        input: EditField,
+    },
     /// Command palette with live filter + selection.
-    Palette { filter: String, cursor: usize },
+    Palette { filter: EditField, cursor: usize },
     /// Confirmation of a bulk launch (N models across providers).
     BulkConfirm,
     /// Pretty-printed statistics of a previous run.
@@ -165,7 +169,7 @@ pub struct SetupState {
     /// Index into the non-header rows of [`State::provider_rows`].
     pub provider_idx: usize,
     /// Live provider search text; empty = browse mode with group headers.
-    pub provider_filter: String,
+    pub provider_filter: EditField,
     /// Models of the currently selected provider.
     pub models: Vec<ModelInfo>,
     pub models_loading: bool,
@@ -184,14 +188,6 @@ pub struct SetupState {
     pub multi_select: bool,
     /// Global (provider_id, model_id) selection — survives provider switches.
     pub bulk: BTreeSet<(String, String)>,
-}
-
-/// Layout rectangles cached during draw — used for mouse click mapping.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct LayoutCache {
-    pub tab_bar: ratatui::layout::Rect,
-    pub setup_panes: [ratatui::layout::Rect; 5],
-    pub run_panes: [ratatui::layout::Rect; 3],
 }
 
 /// Preferences persisted to `ui.json` next to the config.
@@ -238,7 +234,7 @@ pub struct HistoryState {
 /// State of the reasoning-map screen (all models across providers).
 #[derive(Default)]
 pub struct MapState {
-    pub filter: String,
+    pub filter: EditField,
     pub idx: usize,
 }
 
@@ -272,59 +268,51 @@ pub struct State {
     pub map: MapState,
     /// Full Models.dev snapshot for the reasoning map (lazy-loaded).
     pub snapshot_all: Option<Arc<CatalogSnapshot>>,
-    pub layout: LayoutCache,
     /// Provider id of the in-flight model fetch (stale-response guard).
     pub requested_models_for: Option<String>,
 }
 
 impl State {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        registry: ProviderRegistry,
-        modelsdev: Arc<lmhub_modelsdev::ModelsDevClient>,
-        auth_store: Arc<std::sync::Mutex<lmhub_core::AuthStore>>,
-        sandbox_runtime: lmhub_sandbox::SandboxRuntime,
-        config: AppConfig,
-        config_path: PathBuf,
-        prompts: Vec<PromptFile>,
-        task_prompts: Vec<PromptFile>,
-        output_base: PathBuf,
-        ui_tx: UnboundedSender<UiMsg>,
-    ) -> Self {
-        let prefs_path = config_path
+    /// Build the app state from the wiring context. The prefs path and the
+    /// initial selections are derived from `ctx` + persisted `ui.json`.
+    pub fn new(ctx: TuiContext, ui_tx: UnboundedSender<UiMsg>) -> Self {
+        let prefs_path = ctx
+            .config_path
             .parent()
             .map(|p| p.join("ui.json"))
-            .unwrap_or_else(|| config_path.clone());
+            .unwrap_or_else(|| ctx.config_path.clone());
         let prefs = SessionPrefs::load(&prefs_path);
 
-        let prompt_idx = config
+        let prompt_idx = ctx
+            .config
             .default_prompt
             .as_ref()
-            .and_then(|name| prompts.iter().position(|p| &p.name == name))
+            .and_then(|name| ctx.prompts.iter().position(|p| &p.name == name))
             .unwrap_or(0);
-        let task_prompt_idx = config
+        let task_prompt_idx = ctx
+            .config
             .default_task_prompt
             .as_ref()
-            .and_then(|name| task_prompts.iter().position(|p| &p.name == name))
+            .and_then(|name| ctx.task_prompts.iter().position(|p| &p.name == name))
             .or_else(|| {
                 prefs
                     .last_task_prompt
                     .as_ref()
-                    .and_then(|name| task_prompts.iter().position(|p| &p.name == name))
+                    .and_then(|name| ctx.task_prompts.iter().position(|p| &p.name == name))
             })
             .unwrap_or(0);
 
         let mut state = Self {
-            registry,
-            modelsdev,
-            auth_store,
-            sandbox_runtime,
-            config,
-            config_path,
+            registry: ctx.registry,
+            modelsdev: ctx.modelsdev,
+            auth_store: ctx.auth_store,
+            sandbox_runtime: ctx.sandbox_runtime,
+            config: ctx.config,
+            config_path: ctx.config_path,
             prefs_path,
-            prompts,
-            task_prompts,
-            output_base,
+            prompts: ctx.prompts,
+            task_prompts: ctx.task_prompts,
+            output_base: ctx.output_base,
             ui_tx,
             screen: crate::action::Screen::Setup,
             modal: None,
@@ -346,7 +334,6 @@ impl State {
             history: HistoryState::default(),
             map: MapState::default(),
             snapshot_all: None,
-            layout: LayoutCache::default(),
             requested_models_for: None,
         };
         // Restore last selections where possible.
@@ -364,7 +351,7 @@ impl State {
     /// while searching. `provider_idx` always refers to non-header rows.
     pub fn provider_rows(&self) -> Vec<ProviderRow> {
         let all = self.registry.all();
-        let filter = self.setup.provider_filter.trim();
+        let filter = self.setup.provider_filter.as_str().trim();
         if filter.is_empty() {
             let mut rows: Vec<ProviderRow> = Vec::new();
             for group in [Group::Native, Group::Routed, Group::Local] {
@@ -482,7 +469,7 @@ impl State {
         let snapshot = self.snapshot_all.as_ref()?;
         let rows = crate::reasoning_map::filtered(
             &crate::reasoning_map::all_models(snapshot, &self.setup.catalog_cache),
-            &self.map.filter,
+            self.map.filter.as_str(),
         );
         rows.get(self.map.idx).cloned()
     }
@@ -494,7 +481,7 @@ impl State {
         };
         crate::reasoning_map::filtered(
             &crate::reasoning_map::all_models(snapshot, &self.setup.catalog_cache),
-            &self.map.filter,
+            self.map.filter.as_str(),
         )
     }
 

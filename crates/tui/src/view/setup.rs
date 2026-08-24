@@ -11,7 +11,12 @@ use ratatui::{
     Frame,
 };
 
-pub fn draw(f: &mut Frame, state: &mut State, area: ratatui::layout::Rect) {
+pub fn draw(
+    f: &mut Frame,
+    state: &State,
+    area: ratatui::layout::Rect,
+    panes: &mut [ratatui::layout::Rect; 5],
+) {
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -31,16 +36,14 @@ pub fn draw(f: &mut Frame, state: &mut State, area: ratatui::layout::Rect) {
         ])
         .split(cols[2]);
 
-    // Layout cache for mouse clicks (indices match Pane::ORDER). right[0]
+    // Pane rects for mouse clicks (indices match Pane::ORDER). right[0]
     // ("Model details") is a read-only info pane — deliberately not
-    // focusable, so it maps to no Pane and stays at its default zero rect.
-    let mut panes = state.layout.setup_panes;
+    // focusable, so it maps to no Pane.
     panes[0] = cols[0]; // Pane::Providers
     panes[1] = cols[1]; // Pane::Models
     panes[2] = right[1]; // Pane::Reasoning (reasoning levels)
     panes[3] = right[2]; // Pane::Prompts (system prompts)
     panes[4] = right[3]; // Pane::Task (task prompts)
-    state.layout.setup_panes = panes;
 
     draw_providers(f, state, cols[0]);
     draw_models(f, state, cols[1]);
@@ -62,7 +65,7 @@ fn draw_providers(f: &mut Frame, state: &State, area: ratatui::layout::Rect) {
     } else {
         ""
     };
-    let filter = &state.setup.provider_filter;
+    let filter = state.setup.provider_filter.as_str();
     let count = state
         .provider_rows()
         .iter()

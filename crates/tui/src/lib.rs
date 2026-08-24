@@ -15,14 +15,18 @@
 
 mod action;
 mod history;
+mod input;
 mod keymap;
-mod pricing;
 mod provider_search;
 mod reasoning_map;
 mod reduce;
+mod reducers;
 mod state;
 mod transcript;
 mod view;
+
+#[cfg(test)]
+mod testutil;
 
 pub use action::Action;
 pub use keymap::dispatch;
@@ -118,30 +122,23 @@ pub async fn run_tui(ctx: TuiContext) -> anyhow::Result<()> {
         }
     });
 
-    let mut state = State::new(
-        ctx.registry,
-        ctx.modelsdev,
-        ctx.auth_store,
-        ctx.sandbox_runtime,
-        ctx.config,
-        ctx.config_path,
-        ctx.prompts,
-        ctx.task_prompts,
-        ctx.output_base,
-        ui_tx,
-    );
+    let mut state = State::new(ctx, ui_tx);
     // Auto-load models for the initially selected provider.
     let initial_effects = state.request_models(false);
     run_effects(&mut state, initial_effects);
 
     let mut tick = tokio::time::interval(TICK_INTERVAL);
+    // Geometry of the last drawn frame — consumed by mouse click mapping.
+    let mut layout = view::RenderInfo::default();
 
     let result = loop {
-        terminal.draw(|f| view::draw(f, &mut state))?;
+        // ratatui 0.30's draw returns CompletedFrame; the frame's RenderInfo
+        // is captured into `layout` for mouse mapping by the closure itself.
+        terminal.draw(|f| layout = view::draw(f, &state))?;
         tokio::select! {
             _ = tick.tick() => {}
             ev = key_rx.recv() => match ev {
-                Some(event) => handle_input(&mut state, event),
+                Some(event) => handle_input(&mut state, &layout, event),
                 None => break Ok(()),
             },
             msg = ui_rx.recv() => match msg {
@@ -206,13 +203,13 @@ pub async fn run_tui(ctx: TuiContext) -> anyhow::Result<()> {
     result
 }
 
-fn handle_input(state: &mut State, event: Event) {
+fn handle_input(state: &mut State, layout: &view::RenderInfo, event: Event) {
     let action = match event {
         Event::Key(key) => key_action(state, key),
         Event::Paste(text) => Some(Action::Paste(text)),
         Event::Mouse(m) => match m.kind {
             MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
-                view::mouse_action(state, m.column, m.row)
+                view::mouse_action(state, layout, m.column, m.row)
             }
             _ => None,
         },
@@ -294,6 +291,29 @@ fn run_effects(state: &mut State, effects: Vec<Effect>) {
                 });
             }
             Effect::SavePrefs => state.prefs.save(&state.prefs_path),
+            Effect::RunCopilotFlow => {
+                let tx = state.ui_tx.clone();
+                let auth_store = std::sync::Arc::clone(&state.auth_store);
+                tokio::spawn(async move {
+                    let result = lmhub_providers::copilot::run_full_flow(&auth_store, |line| {
+                        let _ = tx.send(UiMsg::Notice(line));
+                    })
+                    .await;
+                    if let Err(e) = result {
+                        let _ = tx.send(UiMsg::Notice(format!("✖ copilot: {e}")));
+                    }
+                });
+            }
+            Effect::OpenOutputDir(dir) => {
+                #[cfg(target_os = "macos")]
+                let opener = "open";
+                #[cfg(not(target_os = "macos"))]
+                let opener = "xdg-open";
+                match std::process::Command::new(opener).arg(&dir).spawn() {
+                    Ok(_) => state.push_notice(format!("opened {}", dir.display())),
+                    Err(e) => state.push_notice(format!("✖ could not open {}: {e}", dir.display())),
+                }
+            }
         }
     }
 }

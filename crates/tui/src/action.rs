@@ -53,6 +53,10 @@ pub enum Action {
     // ---- key-entry modal ---------------------------------------------------
     EnterKeyChar(char),
     EnterKeyBackspace,
+    /// Forward-delete at the cursor in the key-entry modal.
+    EnterKeyDelete,
+    /// Move the key-entry cursor (`±1` per arrow press).
+    EnterKeyCursor(i32),
     SaveKey,
 
     // ---- run -------------------------------------------------------------
@@ -146,4 +150,9 @@ pub enum Effect {
     LoadSnapshot,
     /// Persist UI prefs (favorites, last selections).
     SavePrefs,
+    /// Run the GitHub Copilot device-flow (long-running; results arrive as
+    /// `UiMsg::Notice`).
+    RunCopilotFlow,
+    /// Open a directory in the platform file manager (blocking spawn).
+    OpenOutputDir(std::path::PathBuf),
 }

@@ -1,7 +1,7 @@
 //! Modal overlays: command palette, bulk confirmation, history/run detail,
 //! API-key entry.
 
-use crate::reduce::PaletteCmd;
+use crate::reducers::PaletteCmd;
 use crate::state::{Modal, State};
 use crate::view::shared::*;
 use ratatui::{
@@ -12,17 +12,17 @@ use ratatui::{
     Frame,
 };
 
-pub fn draw(f: &mut Frame, state: &mut State, modal: &Modal) {
+pub fn draw(f: &mut Frame, state: &State, modal: &Modal) {
     match modal {
         Modal::EnterKey { provider_id, input } => {
             draw_key_entry(
                 f,
                 provider_id,
-                input,
+                input.as_str(),
                 state.setup.focus == crate::state::Pane::Providers,
             );
         }
-        Modal::Palette { filter, cursor } => draw_palette(f, state, filter, *cursor),
+        Modal::Palette { filter, cursor } => draw_palette(f, state, filter.as_str(), *cursor),
         Modal::BulkConfirm => draw_bulk_confirm(f, state),
         Modal::HistoryDetail(text) => draw_detail(f, text, " statistics (Esc closes) "),
         Modal::RunDetail { run_id } => draw_run_detail(f, state, *run_id),

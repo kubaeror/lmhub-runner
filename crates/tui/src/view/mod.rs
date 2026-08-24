@@ -1,5 +1,9 @@
 //! Draw dispatch: chrome (tabs + footer), per-screen views, modal overlay.
-//! Also records the layout cache so mouse clicks can be mapped to panes.
+//!
+//! Drawing is **pure** — it never mutates [`State`]. The [`RenderInfo`] it
+//! returns captures this frame's geometry, which input handling (mouse
+//! clicks) then consumes. This removes the old mutation-during-draw layout
+//! cache that could map clicks with stale rectangles.
 
 pub mod history;
 pub mod palette;
@@ -11,14 +15,26 @@ pub mod shared;
 use crate::action::Screen;
 use crate::state::State;
 use ratatui::{
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Paragraph, Tabs},
     Frame,
 };
 
-pub fn draw(f: &mut Frame, state: &mut State) {
+/// Geometry of the most recently drawn frame, returned by [`draw`] and
+/// consumed by [`mouse_action`]. All-zero by default, so clicks before the
+/// first draw map to nothing.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RenderInfo {
+    pub tab_bar: Rect,
+    /// Setup panes, indexed by `Pane::ORDER`.
+    pub setup_panes: [Rect; 5],
+    /// Run screen: `[0]` session list, `[1]` transcript.
+    pub run_panes: [Rect; 2],
+}
+
+pub fn draw(f: &mut Frame, state: &State) -> RenderInfo {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -43,11 +59,14 @@ pub fn draw(f: &mut Frame, state: &mut State) {
             .select(idx),
         chunks[0],
     );
-    state.layout.tab_bar = chunks[0];
 
+    let mut info = RenderInfo {
+        tab_bar: chunks[0],
+        ..Default::default()
+    };
     match state.screen {
-        Screen::Setup => setup::draw(f, state, chunks[1]),
-        Screen::Run => run::draw(f, state, chunks[1]),
+        Screen::Setup => setup::draw(f, state, chunks[1], &mut info.setup_panes),
+        Screen::Run => run::draw(f, state, chunks[1], &mut info.run_panes),
         Screen::History => history::draw(f, state, chunks[1]),
         Screen::Reasoning => reasoning::draw(f, state, chunks[1]),
     }
@@ -59,16 +78,22 @@ pub fn draw(f: &mut Frame, state: &mut State) {
     ]);
     f.render_widget(Paragraph::new(footer), chunks[2]);
 
-    if let Some(modal) = state.modal.clone() {
-        palette::draw(f, state, &modal);
+    if let Some(modal) = &state.modal {
+        palette::draw(f, state, modal);
     }
+    info
 }
 
-/// Map a mouse click to an action using the layout cache from the last draw.
-pub fn mouse_action(state: &State, col: u16, row: u16) -> Option<crate::action::Action> {
+/// Map a mouse click to an action using the geometry of the last drawn frame.
+pub fn mouse_action(
+    state: &State,
+    info: &RenderInfo,
+    col: u16,
+    row: u16,
+) -> Option<crate::action::Action> {
     use ratatui::layout::Position;
-    if state.layout.tab_bar.contains(Position::new(col, row)) {
-        let tab_bar = state.layout.tab_bar;
+    if info.tab_bar.contains(Position::new(col, row)) {
+        let tab_bar = info.tab_bar;
         let n = Screen::ALL.len() as u16;
         let per = tab_bar.width.div_ceil(n).max(1);
         let idx = (col.saturating_sub(tab_bar.x)) / per;
@@ -77,10 +102,8 @@ pub fn mouse_action(state: &State, col: u16, row: u16) -> Option<crate::action::
     }
     if state.screen == Screen::Setup {
         for (i, pane) in crate::state::Pane::ORDER.iter().enumerate() {
-            if let Some(rect) = state.layout.setup_panes.get(i) {
-                if rect.contains(Position::new(col, row)) {
-                    return Some(crate::action::Action::FocusPane(*pane));
-                }
+            if info.setup_panes[i].contains(Position::new(col, row)) {
+                return Some(crate::action::Action::FocusPane(*pane));
             }
         }
     }
@@ -91,34 +114,6 @@ pub fn mouse_action(state: &State, col: u16, row: u16) -> Option<crate::action::
 mod tests {
     use super::*;
     use crate::state::Pane;
-    use ratatui::layout::Rect;
-
-    /// A bare state with the full registry and no prefs — enough for
-    /// `mouse_action`, which only inspects `screen` + `layout`.
-    fn state_with() -> State {
-        let dir = tempfile::tempdir().unwrap();
-        let store = std::sync::Arc::new(std::sync::Mutex::new(lmhub_core::AuthStore::load(
-            dir.path().join("auth.json"),
-        )));
-        let (registry, _) =
-            lmhub_providers::build_registry(dir.path(), std::sync::Arc::clone(&store));
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        State::new(
-            registry,
-            std::sync::Arc::new(lmhub_modelsdev::ModelsDevClient::new(
-                dir.path().join("cache"),
-                std::time::Duration::from_secs(60),
-            )),
-            store,
-            lmhub_sandbox::SandboxRuntime::Legacy,
-            lmhub_core::AppConfig::default(),
-            dir.path().join("config.toml"),
-            Vec::new(),
-            Vec::new(),
-            dir.path().join("output"),
-            tx,
-        )
-    }
 
     fn rect(x: u16, y: u16, w: u16, h: u16) -> Rect {
         Rect::new(x, y, w, h)
@@ -126,40 +121,60 @@ mod tests {
 
     #[test]
     fn setup_mouse_maps_clickable_panes() {
-        let mut s = state_with();
-        s.screen = Screen::Setup;
-        // Simulate the rects recorded by view::setup::draw: providers left,
-        // models middle, reasoning/prompts/task stacked on the right. The
-        // "Model details" region (right column, top) is NOT a focusable pane.
-        let mut panes = [Rect::default(); 5];
-        panes[0] = rect(0, 0, 40, 30); // Providers
-        panes[1] = rect(40, 0, 40, 30); // Models
-        panes[2] = rect(80, 6, 20, 3); // Reasoning levels
-        panes[3] = rect(80, 9, 20, 7); // System prompts
-        panes[4] = rect(80, 16, 20, 7); // Task prompts
-        s.layout.setup_panes = panes;
+        let (state, _dir) = crate::testutil::test_state();
+        let mut info = RenderInfo {
+            tab_bar: rect(0, 0, 100, 1),
+            ..Default::default()
+        };
+        // Providers left, models middle, reasoning/prompts/task stacked on
+        // the right. The "Model details" region (right column, top) is NOT
+        // a focusable pane.
+        info.setup_panes[0] = rect(0, 1, 40, 30);
+        info.setup_panes[1] = rect(40, 1, 40, 30);
+        info.setup_panes[2] = rect(80, 7, 20, 3);
+        info.setup_panes[3] = rect(80, 10, 20, 7);
+        info.setup_panes[4] = rect(80, 17, 20, 7);
 
         assert!(matches!(
-            mouse_action(&s, 10, 10),
+            mouse_action(&state, &info, 10, 10),
             Some(crate::action::Action::FocusPane(Pane::Providers))
         ));
         assert!(matches!(
-            mouse_action(&s, 50, 10),
+            mouse_action(&state, &info, 50, 10),
             Some(crate::action::Action::FocusPane(Pane::Models))
         ));
         assert!(matches!(
-            mouse_action(&s, 85, 7),
+            mouse_action(&state, &info, 85, 8),
             Some(crate::action::Action::FocusPane(Pane::Reasoning))
         ));
         assert!(matches!(
-            mouse_action(&s, 85, 12),
+            mouse_action(&state, &info, 85, 13),
             Some(crate::action::Action::FocusPane(Pane::Prompts))
         ));
         assert!(matches!(
-            mouse_action(&s, 85, 20),
+            mouse_action(&state, &info, 85, 20),
             Some(crate::action::Action::FocusPane(Pane::Task))
         ));
         // Clicking the read-only "Model details" region focuses nothing.
-        assert!(mouse_action(&s, 85, 3).is_none());
+        assert!(mouse_action(&state, &info, 85, 3).is_none());
+    }
+
+    #[test]
+    fn mouse_clicks_tab_bar_switches_screen() {
+        let (state, _dir) = crate::testutil::test_state();
+        let info = RenderInfo {
+            tab_bar: rect(0, 0, 100, 1),
+            ..Default::default()
+        };
+        // 100/4 = 25 per tab: [1]Setup 0-24, [2]Run 25-49, [3]History 50-74,
+        // [4]Reasoning 75-99.
+        assert!(matches!(
+            mouse_action(&state, &info, 30, 0),
+            Some(crate::action::Action::SwitchScreen(Screen::Run))
+        ));
+        assert!(matches!(
+            mouse_action(&state, &info, 85, 0),
+            Some(crate::action::Action::SwitchScreen(Screen::Reasoning))
+        ));
     }
 }

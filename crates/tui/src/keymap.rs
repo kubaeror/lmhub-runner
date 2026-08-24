@@ -73,6 +73,9 @@ fn modal_keys(modal: &Modal, key: KeyEvent) -> Option<Action> {
             KeyCode::Esc => Some(Action::CloseModal),
             KeyCode::Enter => Some(Action::SaveKey),
             KeyCode::Backspace => Some(Action::EnterKeyBackspace),
+            KeyCode::Delete => Some(Action::EnterKeyDelete),
+            KeyCode::Left => Some(Action::EnterKeyCursor(-1)),
+            KeyCode::Right => Some(Action::EnterKeyCursor(1)),
             KeyCode::Char(c) => Some(Action::EnterKeyChar(c)),
             _ => None,
         },
@@ -167,14 +170,14 @@ fn setup_keys(state: &State, key: KeyEvent) -> Option<Action> {
 /// Auto-filter: typing in the providers pane edits the search text — but
 /// reserved keys keep their action.
 fn provider_search_char(state: &State, c: char) -> Option<Action> {
-    let mut text = state.setup.provider_filter.clone();
+    let mut text = state.setup.provider_filter.as_str().to_string();
     text.push(c);
     Some(Action::SearchProviders(text))
 }
 
 /// Backspace in the providers search removes the last filter character.
 fn provider_search_backspace(state: &State) -> Option<Action> {
-    let mut text = state.setup.provider_filter.clone();
+    let mut text = state.setup.provider_filter.as_str().to_string();
     text.pop();
     Some(Action::SearchProviders(text))
 }
@@ -212,7 +215,11 @@ fn reasoning_map_keys(state: &State, key: KeyEvent) -> Option<Action> {
         KeyCode::F(5) => Some(Action::ReloadSnapshot),
         // Uppercase: lowercase letters belong to the live filter.
         KeyCode::Char('D') => Some(Action::CycleModelDefault),
-        KeyCode::Char(c) => Some(Action::MapFilter(format!("{}{}", state.map.filter, c))),
+        KeyCode::Char(c) => Some(Action::MapFilter(format!(
+            "{}{}",
+            state.map.filter.as_str(),
+            c
+        ))),
         _ => None,
     }
 }
@@ -228,28 +235,7 @@ mod tests {
 
     /// A modal-less state for dispatch tests.
     fn state_with() -> State {
-        let dir = tempfile::tempdir().unwrap();
-        let store = std::sync::Arc::new(std::sync::Mutex::new(lmhub_core::AuthStore::load(
-            dir.path().join("auth.json"),
-        )));
-        let (registry, _) =
-            lmhub_providers::build_registry(dir.path(), std::sync::Arc::clone(&store));
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        State::new(
-            registry,
-            std::sync::Arc::new(lmhub_modelsdev::ModelsDevClient::new(
-                dir.path().join("cache"),
-                std::time::Duration::from_secs(60),
-            )),
-            store,
-            lmhub_sandbox::SandboxRuntime::Legacy,
-            lmhub_core::AppConfig::default(),
-            dir.path().join("config.toml"),
-            Vec::new(),
-            Vec::new(),
-            dir.path().join("output"),
-            tx,
-        )
+        crate::testutil::test_state().0
     }
 
     #[test]
@@ -283,7 +269,7 @@ mod tests {
         ));
         s.modal = Some(Modal::EnterKey {
             provider_id: "x".into(),
-            input: String::new(),
+            input: "".into(),
         });
         assert!(matches!(
             dispatch(&s, key(KeyCode::Char('q'))),

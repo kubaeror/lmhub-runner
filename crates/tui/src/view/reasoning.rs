@@ -20,7 +20,7 @@ pub fn draw(f: &mut Frame, state: &State, area: Rect) {
 
     let rows_all = state.map_rows();
     let cursor = "▏";
-    let filter = &state.map.filter;
+    let filter = state.map.filter.as_str();
     let info = if state.snapshot_all.is_none() {
         "loading Models.dev snapshot…".to_string()
     } else {
