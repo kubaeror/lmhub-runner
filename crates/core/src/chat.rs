@@ -6,9 +6,10 @@ use std::fmt;
 /// Selected reasoning effort for a run. Ordered weakest → strongest.
 /// Mirrors the levels models.dev declares in `reasoning_options` (the same
 /// source opencode uses): `off/minimal/low/medium/high/xhigh/max`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningLevel {
+    #[default]
     Off,
     Minimal,
     Low,

@@ -47,7 +47,10 @@ The interactive TUI starts — no CLI flags. The tabs are:
    checks models **across providers** (selection survives switching), `x` on
    the task prompt launches them all after a confirmation modal. Each run
    uses its model's pinned default reasoning level when one exists (clamped
-   to what the model supports).
+   to what the model supports); otherwise the currently selected reasoning
+   level is used — that choice **survives navigating between models and
+   providers**, so what you set is what bulk runs get. The confirmation
+   modal shows the reasoning each run will actually use.
 4. **Reasoning** — every model across all 194 providers with its supported
    reasoning levels (type to filter, `D` cycles the ★ default on the
    selected model, `F5` reloads the snapshot).

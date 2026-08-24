@@ -118,10 +118,29 @@ mod tests {
         }
     }
 
+    /// A model that supports reasoning levels off/low/high.
+    fn reasoning_model(id: &str) -> lmhub_core::ModelInfo {
+        lmhub_core::ModelInfo {
+            id: id.into(),
+            name: id.into(),
+            capabilities: lmhub_core::Capabilities {
+                reasoning: true,
+                reasoning_levels: Some(vec![
+                    lmhub_core::ReasoningLevel::Off,
+                    lmhub_core::ReasoningLevel::Low,
+                    lmhub_core::ReasoningLevel::High,
+                ]),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
     /// Fake a loaded catalog for `provider_id` so bulk specs resolve.
+    /// Models are reasoning-capable so pinned/chosen levels survive clamping.
     fn seed_catalog(state: &mut State, provider_id: &str, model_ids: &[&str]) {
         let catalog = lmhub_core::ModelCatalog {
-            models: model_ids.iter().map(|m| model(m)).collect(),
+            models: model_ids.iter().map(|m| reasoning_model(m)).collect(),
             source: Some(lmhub_core::ModelListSource::ModelsDev),
             warnings: Vec::new(),
         };
@@ -399,9 +418,9 @@ mod tests {
         };
         state.setup.models = vec![m1.clone()];
         state.setup.model_idx = 0;
-        state.setup.reasoning_idx = 0;
-        // Pin high as the default.
-        state.setup.reasoning_idx = 2;
+        // Cycle up to high (records the choice in `setup.reasoning`).
+        state.reduce(Action::CycleReasoning(2));
+        assert_eq!(state.selected_reasoning(), lmhub_core::ReasoningLevel::High);
         let effects = state.reduce(Action::SetModelDefault);
         assert_eq!(
             state.prefs.model_defaults.get("claude-3-7-sonnet"),
@@ -412,7 +431,109 @@ mod tests {
         state.setup.reasoning_idx = 0;
         state.snap_reasoning_to_default();
         assert_eq!(state.setup.reasoning_idx, 2);
+        assert_eq!(state.selected_reasoning(), lmhub_core::ReasoningLevel::High);
         let _ = m1;
+    }
+
+    #[test]
+    fn reasoning_choice_survives_model_switch() {
+        let (mut state, _dir) = crate::testutil::test_state();
+        state.setup.models = vec![reasoning_model("gpt-4o"), reasoning_model("gpt-4o-mini")];
+        state.setup.model_idx = 0;
+        state.setup.focus = crate::state::Pane::Models;
+        state.reduce(Action::CycleReasoning(2)); // high
+        assert_eq!(state.selected_reasoning(), lmhub_core::ReasoningLevel::High);
+        // Navigating to another model must keep the chosen level.
+        state.reduce(Action::MoveSelection(1));
+        assert_eq!(
+            state.setup.reasoning_idx, 2,
+            "display follows the kept level"
+        );
+        assert_eq!(state.selected_reasoning(), lmhub_core::ReasoningLevel::High);
+    }
+
+    #[test]
+    fn bulk_run_uses_chosen_reasoning_after_navigation() {
+        let (mut state, _dir) = crate::testutil::test_state();
+        seed_catalog(&mut state, "openai", &["gpt-4o", "gpt-4o-mini"]);
+        state.setup.models = vec![reasoning_model("gpt-4o"), reasoning_model("gpt-4o-mini")];
+        seed_task_prompts(&mut state, &["build"]);
+        state.setup.bulk = std::collections::BTreeSet::from([
+            ("openai".into(), "gpt-4o".into()),
+            ("openai".into(), "gpt-4o-mini".into()),
+        ]);
+        state.setup.focus = crate::state::Pane::Models;
+        state.reduce(Action::CycleReasoning(2)); // high
+                                                 // Land on a different model: the old bug degraded the bulk fallback
+                                                 // to off here (reasoning was derived from the *current* model).
+        state.reduce(Action::MoveSelection(1));
+        state.reduce(Action::BulkStart);
+        state.reduce(Action::ConfirmBulkStart);
+        assert!(
+            state.runs.runs.iter().all(|r| r.reasoning == "high"),
+            "chosen reasoning must reach every bulk run: {:?}",
+            state
+                .runs
+                .runs
+                .iter()
+                .map(|r| (r.model_id.as_str(), r.reasoning.as_str()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn bulk_run_clamps_to_model_capabilities() {
+        let (mut state, _dir) = crate::testutil::test_state();
+        seed_catalog(&mut state, "openai", &["gpt-4o", "gpt-4o-mini"]);
+        // Override mini's catalog entry with a non-reasoning model.
+        let mut cache = state.setup.catalog_cache.get("openai").unwrap().clone();
+        cache.models[1] = model("gpt-4o-mini");
+        state.setup.catalog_cache.insert("openai".into(), cache);
+        state.setup.models = vec![reasoning_model("gpt-4o"), reasoning_model("gpt-4o-mini")];
+        seed_task_prompts(&mut state, &["build"]);
+        state.setup.bulk = std::collections::BTreeSet::from([
+            ("openai".into(), "gpt-4o".into()),
+            ("openai".into(), "gpt-4o-mini".into()),
+        ]);
+        state.reduce(Action::CycleReasoning(2)); // high
+        state.reduce(Action::BulkStart);
+        state.reduce(Action::ConfirmBulkStart);
+        let by_model: std::collections::BTreeMap<String, String> = state
+            .runs
+            .runs
+            .iter()
+            .map(|r| (r.model_id.clone(), r.reasoning.clone()))
+            .collect();
+        // Reasoning model keeps the choice; the non-reasoning one clamps.
+        assert_eq!(by_model["gpt-4o"], "high");
+        assert_eq!(by_model["gpt-4o-mini"], "off");
+    }
+
+    #[test]
+    fn bulk_run_prefers_pinned_default_over_chosen_level() {
+        let (mut state, _dir) = crate::testutil::test_state();
+        seed_catalog(&mut state, "openai", &["gpt-4o", "gpt-4o-mini"]);
+        state.setup.models = vec![reasoning_model("gpt-4o"), reasoning_model("gpt-4o-mini")];
+        seed_task_prompts(&mut state, &["build"]);
+        state
+            .prefs
+            .model_defaults
+            .insert("gpt-4o-mini".into(), lmhub_core::ReasoningLevel::Low);
+        state.setup.bulk = std::collections::BTreeSet::from([
+            ("openai".into(), "gpt-4o".into()),
+            ("openai".into(), "gpt-4o-mini".into()),
+        ]);
+        state.reduce(Action::CycleReasoning(2)); // high chosen
+        state.reduce(Action::BulkStart);
+        state.reduce(Action::ConfirmBulkStart);
+        let by_model: std::collections::BTreeMap<String, String> = state
+            .runs
+            .runs
+            .iter()
+            .map(|r| (r.model_id.clone(), r.reasoning.clone()))
+            .collect();
+        assert_eq!(by_model["gpt-4o"], "high", "chosen level applies");
+        assert_eq!(by_model["gpt-4o-mini"], "low", "pinned default wins");
     }
 
     #[test]
@@ -475,7 +596,22 @@ mod tests {
     fn bulk_uses_per_model_default_reasoning() {
         let (mut state, _dir) = crate::testutil::test_state();
         seed_catalog(&mut state, "openai", &["gpt-4o", "gpt-4o-mini"]);
-        state.setup.models = vec![model("gpt-4o"), model("gpt-4o-mini")];
+        // Both models must actually support reasoning for a pinned level to
+        // survive clamping.
+        let reasoning_model = |id: &str| lmhub_core::ModelInfo {
+            id: id.into(),
+            capabilities: lmhub_core::Capabilities {
+                reasoning: true,
+                reasoning_levels: Some(vec![
+                    lmhub_core::ReasoningLevel::Off,
+                    lmhub_core::ReasoningLevel::Low,
+                    lmhub_core::ReasoningLevel::High,
+                ]),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        state.setup.models = vec![reasoning_model("gpt-4o"), reasoning_model("gpt-4o-mini")];
         seed_task_prompts(&mut state, &["build"]);
         state
             .prefs
@@ -493,7 +629,7 @@ mod tests {
             .iter()
             .map(|r| (r.model_id.clone(), r.reasoning.clone()))
             .collect();
-        // No default → current selection (off); default set → low.
+        // No default → chosen level (off by default); default set → low.
         assert_eq!(by_model["gpt-4o"], "off");
         assert_eq!(by_model["gpt-4o-mini"], "low");
     }
