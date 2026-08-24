@@ -29,6 +29,17 @@ impl Usage {
     pub fn total(&self) -> u64 {
         self.input_tokens.saturating_add(self.output_tokens)
     }
+
+    /// Cache hit ratio (`cache_read / input`), `None` when there is no input.
+    /// Canonical implementation — `statistics.json` and the TUI's live
+    /// counter both use this so the numbers never drift.
+    pub fn cache_hit_ratio(&self) -> Option<f64> {
+        if self.input_tokens == 0 {
+            None
+        } else {
+            Some(self.cache_read_tokens.unwrap_or(0) as f64 / self.input_tokens as f64)
+        }
+    }
 }
 
 fn sum_opt(a: Option<u64>, b: Option<u64>) -> Option<u64> {
@@ -62,5 +73,16 @@ mod tests {
         assert_eq!(u.output_tokens, 7);
         assert_eq!(u.cache_read_tokens, Some(4));
         assert_eq!(u.reasoning_tokens, Some(7));
+    }
+
+    #[test]
+    fn cache_hit_ratio_is_null_without_input() {
+        assert_eq!(Usage::default().cache_hit_ratio(), None);
+        let u = Usage {
+            input_tokens: 100,
+            cache_read_tokens: Some(40),
+            ..Default::default()
+        };
+        assert!((u.cache_hit_ratio().unwrap() - 0.4).abs() < 1e-9);
     }
 }

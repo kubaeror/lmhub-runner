@@ -3,6 +3,7 @@
 
 use crate::state::{Pane, State};
 use crate::view::shared::*;
+use crate::view::RenderInfo;
 use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
@@ -11,7 +12,7 @@ use ratatui::{
     Frame,
 };
 
-pub fn draw(f: &mut Frame, state: &mut State, area: ratatui::layout::Rect) {
+pub fn draw(f: &mut Frame, state: &State, area: ratatui::layout::Rect, info: &mut RenderInfo) {
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -26,22 +27,22 @@ pub fn draw(f: &mut Frame, state: &mut State, area: ratatui::layout::Rect) {
         .constraints([
             Constraint::Min(4),
             Constraint::Length(3),
-            Constraint::Length(7),
-            Constraint::Length(7),
+            Constraint::Ratio(1, 2),
+            Constraint::Ratio(1, 2),
         ])
         .split(cols[2]);
 
-    // Layout cache for mouse clicks (indices match Pane::ORDER).
-    let mut panes = state.layout.setup_panes;
-    panes[0] = cols[0];
-    panes[1] = cols[1];
-    panes[2] = right[0];
-    panes[3] = right[1];
-    panes[4] = right[2];
-    state.layout.setup_panes = panes;
+    // Pane rects for mouse clicks (indices match Pane::ORDER). right[0]
+    // ("Model details") is a read-only info pane — deliberately not
+    // focusable, so it maps to no Pane.
+    info.setup_panes[0] = cols[0]; // Pane::Providers
+    info.setup_panes[1] = cols[1]; // Pane::Models
+    info.setup_panes[2] = right[1]; // Pane::Reasoning (reasoning levels)
+    info.setup_panes[3] = right[2]; // Pane::Prompts (system prompts)
+    info.setup_panes[4] = right[3]; // Pane::Task (task prompts)
 
-    draw_providers(f, state, cols[0]);
-    draw_models(f, state, cols[1]);
+    draw_providers(f, state, cols[0], info);
+    draw_models(f, state, cols[1], info);
 
     draw_details(f, state, right[0]);
     draw_reasoning(f, state, right[1]);
@@ -49,7 +50,12 @@ pub fn draw(f: &mut Frame, state: &mut State, area: ratatui::layout::Rect) {
     draw_task_prompts(f, state, right[3]);
 }
 
-fn draw_providers(f: &mut Frame, state: &State, area: ratatui::layout::Rect) {
+fn draw_providers(
+    f: &mut Frame,
+    state: &State,
+    area: ratatui::layout::Rect,
+    info: &mut RenderInfo,
+) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(1)])
@@ -60,7 +66,7 @@ fn draw_providers(f: &mut Frame, state: &State, area: ratatui::layout::Rect) {
     } else {
         ""
     };
-    let filter = &state.setup.provider_filter;
+    let filter = state.setup.provider_filter.as_str();
     let count = state
         .provider_rows()
         .iter()
@@ -133,6 +139,7 @@ fn draw_providers(f: &mut Frame, state: &State, area: ratatui::layout::Rect) {
         }
     }
 
+    let total = items.len();
     let list = List::new(items)
         .block(bordered_block(
             " Providers ",
@@ -143,11 +150,14 @@ fn draw_providers(f: &mut Frame, state: &State, area: ratatui::layout::Rect) {
                 .bg(Color::DarkGray)
                 .add_modifier(Modifier::BOLD),
         );
+    let (list_area, bar_area) = scrollbar_area(rows[1], total);
     let mut st = ListState::default().with_selected(Some(selected_item));
-    f.render_stateful_widget(list, rows[1], &mut st);
+    f.render_stateful_widget(list, list_area, &mut st);
+    info.offsets.providers = st.offset();
+    render_scrollbar(f, bar_area, total, st.offset());
 }
 
-fn draw_models(f: &mut Frame, state: &State, area: ratatui::layout::Rect) {
+fn draw_models(f: &mut Frame, state: &State, area: ratatui::layout::Rect, info: &mut RenderInfo) {
     let checked = state.bulk_checked_indices().len();
     let title = match (state.setup.models_loading, state.setup.model_source) {
         (true, _) => " Models — loading… ".to_string(),
@@ -198,6 +208,7 @@ fn draw_models(f: &mut Frame, state: &State, area: ratatui::layout::Rect) {
             ListItem::new(format!("{marker}{label}"))
         })
         .collect();
+    let total = items.len();
     let list = List::new(items)
         .block(bordered_block(
             title,
@@ -208,13 +219,16 @@ fn draw_models(f: &mut Frame, state: &State, area: ratatui::layout::Rect) {
                 .bg(Color::DarkGray)
                 .add_modifier(Modifier::BOLD),
         );
+    let (list_area, bar_area) = scrollbar_area(area, total);
     let mut st = ListState::default().with_selected(Some(
         state
             .setup
             .model_idx
             .min(state.setup.models.len().saturating_sub(1)),
     ));
-    f.render_stateful_widget(list, area, &mut st);
+    f.render_stateful_widget(list, list_area, &mut st);
+    info.offsets.models = st.offset();
+    render_scrollbar(f, bar_area, total, st.offset());
 }
 
 fn draw_details(f: &mut Frame, state: &State, area: ratatui::layout::Rect) {

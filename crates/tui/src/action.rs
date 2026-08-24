@@ -13,6 +13,8 @@ pub enum Action {
     ForceQuit,
     SwitchScreen(Screen),
     OpenPalette,
+    /// `?` — open the keybinding help overlay.
+    OpenHelp,
     CloseModal,
     /// A transient status message from a background task.
     Notice(String),
@@ -53,6 +55,10 @@ pub enum Action {
     // ---- key-entry modal ---------------------------------------------------
     EnterKeyChar(char),
     EnterKeyBackspace,
+    /// Forward-delete at the cursor in the key-entry modal.
+    EnterKeyDelete,
+    /// Move the key-entry cursor (`±1` per arrow press).
+    EnterKeyCursor(i32),
     SaveKey,
 
     // ---- run -------------------------------------------------------------
@@ -74,13 +80,25 @@ pub enum Action {
     MapFilter(String),
     MapClear,
     MapMove(i32),
-    /// `d` in the map: cycle the default reasoning for the selected model.
+    /// `d` on the map: cycle the default reasoning for the selected model.
     CycleModelDefault,
     /// `d` in the setup Reasoning pane: pin the current level as the
     /// model's default.
     SetModelDefault,
     /// F5 in the map: reload the Models.dev snapshot.
     ReloadSnapshot,
+    /// Scroll the history-detail modal (`↑`/`↓`, mouse wheel).
+    ScrollHistoryDetail(i32),
+    /// Mouse wheel over a setup pane: focus it and move its selection.
+    MouseWheelSetup {
+        pane: Pane,
+        dir: i32,
+    },
+    /// Mouse click on a list row: focus (when applicable) and select it.
+    MouseSelectRow {
+        target: SelectTarget,
+        idx: usize,
+    },
 
     // ---- palette ---------------------------------------------------------
     PaletteChar(char),
@@ -130,6 +148,16 @@ impl Screen {
     }
 }
 
+/// Which list a mouse click targeted (for row selection).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectTarget {
+    Providers,
+    Models,
+    Sessions,
+    History,
+    Map,
+}
+
 /// Side effects returned by `reduce`; executed by the event loop.
 pub enum Effect {
     /// Spawn a Models.dev resolution for one provider (stale-guarded by id).
@@ -146,4 +174,9 @@ pub enum Effect {
     LoadSnapshot,
     /// Persist UI prefs (favorites, last selections).
     SavePrefs,
+    /// Run the GitHub Copilot device-flow (long-running; results arrive as
+    /// `UiMsg::Notice`).
+    RunCopilotFlow,
+    /// Open a directory in the platform file manager (blocking spawn).
+    OpenOutputDir(std::path::PathBuf),
 }

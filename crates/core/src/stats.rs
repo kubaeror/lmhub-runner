@@ -231,8 +231,7 @@ pub fn build_document(
     finished_at: String,
 ) -> StatisticsDocument {
     let u = &metrics.usage;
-    let cache_read = u.cache_read_tokens.unwrap_or(0);
-    let cache_hit_ratio = ratio(cache_read as f64, u.input_tokens as f64);
+    let cache_hit_ratio = u.cache_hit_ratio();
 
     let generation_secs = metrics.llm_duration_ms_total as f64 / 1000.0;
     let tps = if generation_secs > 0.0 {

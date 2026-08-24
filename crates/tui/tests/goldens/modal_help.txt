@@ -1,0 +1,28 @@
+ [1] Setup │ [2] Run │ [3] History │ [4] Reasoning                                                  
+ search: ▏                      ┌ Models [Models.dev] ─────────────┐┌ Model details ───────────────┐
+┌ Providers ──────────────────┐ │GPT-4o                            ││model   gpt-4o                │
+│── NATIVE ──                 │↑│GPT-4o mini                       ││family  GPT                   │
+│Amazon Bedrock┌ Keybindings (? closes) ────────────────────────────────────────────┐──────────────┘
+│Anthropic [no │── Global ──                                                        │ault, d=set) ─┐
+│Azure [no key]│  ?                help                                             │h★]           │
+│Azure Cognitiv│  :                command palette                                  │──────────────┘
+│Cohere [no key│  Tab              next tab                                         │(d=set default┐
+│GitHub Copilot│  Ctrl-C/Ctrl-Q    quit (always)                                    │              │
+│GitLab Duo [no│  q                quit (outside filter fields)                     │              │
+│Google [no key│  mouse            click tabs/panes/rows · wheel scrolls            │              │
+│OpenAI [no key│                                                                    │              │
+│Vertex [no key│── Setup ──                                                         │              │
+│Vertex (Anthro│  type             search providers                                 │              │
+│watsonx.ai [no│  ←/→              focus pane                                       │              │
+│── ROUTED ──  │  ↑/↓              select                                           │              │
+│302.AI [no key│  Enter            connect / set key                                │──────────────┘
+│Abacus [no key│  Backspace        delete search char                               │trl-Enter = RU┐
+│abliteration.a│  F                favorite provider                                │              │
+│ai& [no key]  │  m                multi-select models                              │              │
+│AI-ROUTER [no │  Space            toggle bulk                                      │              │
+│AIHubMix [no k│  C                clear bulk                                       │              │
+│AKI.IO [no key└────────────────────────────────────────────────────────────────────┘              │
+│Alibaba [no key]             │║│                                  ││                              │
+│Alibaba (China) [no key]     │↓│                                  ││                              │
+└─────────────────────────────┘ └──────────────────────────────────┘└──────────────────────────────┘
+  type search providers  ←/→ focus pane  ↑/↓ select  Enter connect / set key  Backspace delete sear…

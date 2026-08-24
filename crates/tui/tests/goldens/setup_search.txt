@@ -1,0 +1,28 @@
+ [1] Setup │ [2] Run │ [3] History │ [4] Reasoning                                                  
+ search: grok▏  — 1 match       ┌ Models [Models.dev] ─────────────┐┌ Model details ───────────────┐
+┌ Providers ───────────────────┐│GPT-4o                            ││model   gpt-4o                │
+│Groq [no key]                 ││GPT-4o mini                       ││family  GPT                   │
+│                              ││GPT-4.1                           │└──────────────────────────────┘
+│                              ││                                  │┌ Reasoning (★default, d=set) ─┐
+│                              ││                                  ││[off] [low] [high★]           │
+│                              ││                                  │└──────────────────────────────┘
+│                              ││                                  │┌ System prompts (d=set default┐
+│                              ││                                  ││▶ default                     │
+│                              ││                                  ││  expert                      │
+│                              ││                                  ││                              │
+│                              ││                                  ││                              │
+│                              ││                                  ││                              │
+│                              ││                                  ││                              │
+│                              ││                                  ││                              │
+│                              ││                                  ││                              │
+│                              ││                                  │└──────────────────────────────┘
+│                              ││                                  │┌ Task prompts (Ctrl-Enter = RU┐
+│                              ││                                  ││  build                       │
+│                              ││                                  ││▶ refactor                    │
+│                              ││                                  ││                              │
+│                              ││                                  ││                              │
+│                              ││                                  ││                              │
+│                              ││                                  ││                              │
+│                              ││                                  ││                              │
+└──────────────────────────────┘└──────────────────────────────────┘└──────────────────────────────┘
+  type search providers  ←/→ focus pane  ↑/↓ select  Enter connect / set key  Backspace delete sear…

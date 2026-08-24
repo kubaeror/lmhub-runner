@@ -2,6 +2,7 @@
 
 use crate::state::State;
 use crate::view::shared::*;
+use crate::view::RenderInfo;
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
@@ -10,7 +11,7 @@ use ratatui::{
     Frame,
 };
 
-pub fn draw(f: &mut Frame, state: &State, area: Rect) {
+pub fn draw(f: &mut Frame, state: &State, area: Rect, info: &mut RenderInfo) {
     if state.history.rows.is_empty() {
         f.render_widget(
             Paragraph::new(format!(
@@ -21,6 +22,7 @@ pub fn draw(f: &mut Frame, state: &State, area: Rect) {
         );
         return;
     }
+    info.history_list = area;
 
     let rows: Vec<ListItem> = state
         .history
@@ -53,6 +55,7 @@ pub fn draw(f: &mut Frame, state: &State, area: Rect) {
             ]))
         })
         .collect();
+    let total = rows.len();
     let list = List::new(rows)
         .block(bordered_block(
             " Previous runs — family/model/reasoning/status/ms/tokens/$ (Enter = statistics) ",
@@ -63,11 +66,14 @@ pub fn draw(f: &mut Frame, state: &State, area: Rect) {
                 .bg(Color::DarkGray)
                 .add_modifier(Modifier::BOLD),
         );
+    let (list_area, bar_area) = scrollbar_area(area, total);
     let mut st = ListState::default().with_selected(Some(
         state
             .history
             .idx
             .min(state.history.rows.len().saturating_sub(1)),
     ));
-    f.render_stateful_widget(list, area, &mut st);
+    f.render_stateful_widget(list, list_area, &mut st);
+    info.offsets.history = st.offset();
+    render_scrollbar(f, bar_area, total, st.offset());
 }

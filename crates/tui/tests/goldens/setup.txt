@@ -1,0 +1,28 @@
+ [1] Setup │ [2] Run │ [3] History │ [4] Reasoning                                                  
+ search: ▏                      ┌ Models [Models.dev] ☑ 1 [multi]──┐┌ Model details ───────────────┐
+┌ Providers ──────────────────┐ │☑ GPT-4o                          ││model   gpt-4o                │
+│── NATIVE ──                 │↑│☐ GPT-4o mini                     ││family  GPT                   │
+│★ Anthropic [no key]         │█│☐ GPT-4.1                         │└──────────────────────────────┘
+│Amazon Bedrock [no key]      │█│                                  │┌ Reasoning (★default, d=set) ─┐
+│Azure [no key]               │║│                                  ││[off] [low] [high★]           │
+│Azure Cognitive Services [no │║│                                  │└──────────────────────────────┘
+│Cohere [no key]              │║│                                  │┌ System prompts (d=set default┐
+│GitHub Copilot [no key]      │║│                                  ││▶ default                     │
+│GitLab Duo [no key]          │║│                                  ││  expert                      │
+│Google [no key]              │║│                                  ││                              │
+│OpenAI [no key] ☑1           │║│                                  ││                              │
+│Vertex [no key]              │║│                                  ││                              │
+│Vertex (Anthropic) [no key]  │║│                                  ││                              │
+│watsonx.ai [no key]          │║│                                  ││                              │
+│── ROUTED ──                 │║│                                  ││                              │
+│302.AI [no key]              │║│                                  │└──────────────────────────────┘
+│Abacus [no key]              │║│                                  │┌ Task prompts (Ctrl-Enter = RU┐
+│abliteration.ai [no key]     │║│                                  ││  build                       │
+│ai& [no key]                 │║│                                  ││▶ refactor                    │
+│AI-ROUTER [no key]           │║│                                  ││                              │
+│AIHubMix [no key]            │║│                                  ││                              │
+│AKI.IO [no key]              │║│                                  ││                              │
+│Alibaba [no key]             │║│                                  ││                              │
+│Alibaba (China) [no key]     │↓│                                  ││                              │
+└─────────────────────────────┘ └──────────────────────────────────┘└──────────────────────────────┘
+  type search providers  ←/→ focus pane  ↑/↓ select  Enter connect / set key  Backspace delete sear…
