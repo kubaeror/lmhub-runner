@@ -45,7 +45,7 @@ impl Default for AppConfig {
             run_timeout_secs: 900,
             max_turns: 30,
             command_timeout_secs: 90,
-            allowed_commands: vec!["node".into(), "npm".into(), "npx".into()],
+            allowed_commands: vec!["node".into(), "npm".into(), "npx".into(), "pnpm".into()],
             modelsdev_ttl_secs: 86_400,
             max_output_tokens: 16_384,
             read_file_max_bytes: 48_000,
@@ -105,7 +105,7 @@ impl AppConfig {
             .collect();
         if cleaned.is_empty() && !self.allowed_commands.is_empty() {
             tracing::warn!("allowed_commands empty or all-blank; restoring defaults");
-            self.allowed_commands = vec!["node".into(), "npm".into(), "npx".into()];
+            self.allowed_commands = vec!["node".into(), "npm".into(), "npx".into(), "pnpm".into()];
         } else {
             self.allowed_commands = cleaned;
         }
@@ -172,6 +172,6 @@ mod tests {
             ..AppConfig::default()
         };
         cfg.sanitize();
-        assert_eq!(cfg.allowed_commands, vec!["node", "npm", "npx"]);
+        assert_eq!(cfg.allowed_commands, vec!["node", "npm", "npx", "pnpm"]);
     }
 }
