@@ -7,11 +7,11 @@
 │Azure [no key]               │║│                                  ││[off] [low] [high★]           │
 │Azure Cognitive Servi┌ Bulk launch — 2 runs (y/Enter = launch) ────────────┐──────────────────────┘
 │Cohere [no key]      │─ openai                                             │prompts (d=set default┐
-│GitHub Copilot [no ke│  • gpt-4o                                           │t                     │
-│GitLab Duo [no key]  │  • gpt-4o-mini                                      │                      │
-│Google [no key]      │                                                     │                      │
-│OpenAI [no key] ☑2   │pricing unknown for these routes — costs will be null│                      │
-│Vertex [no key]      │                                                     │                      │
+│GitHub Copilot [no ke│  • gpt-4o  [high]                                   │t                     │
+│GitLab Duo [no key]  │  • gpt-4o-mini  [off]                               │                      │
+│Google [no key]      │reasoning: off (★ per-model defaults override)       │                      │
+│OpenAI [no key] ☑2   │                                                     │                      │
+│Vertex [no key]      │pricing unknown for these routes — costs will be null│                      │
 │Vertex (Anthropic) [n│                                                     │                      │
 │watsonx.ai [no key]  │                                                     │                      │
 │── ROUTED ──         │                                                     │                      │

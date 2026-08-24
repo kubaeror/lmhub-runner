@@ -63,6 +63,11 @@ impl State {
                 let len = levels.len().max(1);
                 self.setup.reasoning_idx =
                     (self.setup.reasoning_idx as i32 + delta).rem_euclid(len as i32) as usize;
+                // Record the chosen level model-independently so it survives
+                // navigation and applies to bulk runs.
+                self.setup.reasoning = *levels
+                    .get(self.setup.reasoning_idx)
+                    .unwrap_or(&lmhub_core::ReasoningLevel::Off);
                 Vec::new()
             }
             Action::CyclePrompt(delta) => {
@@ -181,7 +186,8 @@ impl State {
             return Vec::new();
         }
         self.setup.model_idx = ((self.setup.model_idx as i32 + delta).max(0) as usize).min(len - 1);
-        self.setup.reasoning_idx = 0;
+        // A pinned default seats the selection; otherwise the last chosen
+        // level is kept (snap never clobbers `setup.reasoning`).
         self.snap_reasoning_to_default();
         Vec::new()
     }
@@ -393,19 +399,16 @@ impl State {
             return Vec::new();
         };
         let system_prompt = self.system_prompt_for(self.setup.prompt_idx);
-        let fallback = self.selected_reasoning();
         let mut effects = Vec::new();
         for spec in specs {
             let provider = match self.registry.get(&spec.provider_id) {
                 Some(p) => p,
                 None => continue,
             };
-            // Per-model default reasoning when set, clamped to the model's
-            // supported levels; otherwise the current selection.
-            let reasoning = self
-                .default_reasoning_for(&spec.model_id)
-                .unwrap_or(fallback)
-                .clamp_to(spec.model.capabilities.reasoning_levels.as_deref());
+            // Per-model pinned default when set, else the user's chosen
+            // level — clamped to what the model supports (see
+            // `State::bulk_reasoning_for`).
+            let reasoning = self.bulk_reasoning_for(&spec);
             effects.extend(self.launch_session(
                 provider,
                 spec.model,

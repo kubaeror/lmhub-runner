@@ -138,6 +138,12 @@ fn draw_bulk_confirm(f: &mut Frame, state: &State) {
             last_provider = spec.provider_id.clone();
         }
         let mut spans = vec![Span::raw(format!("  • {}", spec.model.id))];
+        // Show the reasoning this run will actually get (pinned default or
+        // the chosen level, clamped to the model) — same logic as launch.
+        spans.push(Span::styled(
+            format!("  [{}]", state.bulk_reasoning_for(spec).as_str()),
+            Style::default().fg(Color::Yellow),
+        ));
         if let Some(pc) = &spec.pricing {
             has_prices = true;
             spans.push(Span::styled(
@@ -150,6 +156,13 @@ fn draw_bulk_confirm(f: &mut Frame, state: &State) {
         }
         lines.push(Line::from(spans));
     }
+    lines.push(Line::from(Span::styled(
+        format!(
+            "reasoning: {} (★ per-model defaults override)",
+            state.setup.reasoning.as_str()
+        ),
+        Style::default().fg(Color::DarkGray),
+    )));
     if !has_prices {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(

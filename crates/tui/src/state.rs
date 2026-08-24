@@ -183,6 +183,11 @@ pub struct SetupState {
     /// Cached catalogs per provider id — enables cross-provider bulk.
     pub catalog_cache: std::collections::BTreeMap<String, CachedCatalog>,
     pub reasoning_idx: usize,
+    /// The reasoning level the user last chose, kept **model-independently**
+    /// across provider/model switches. This is what single and bulk runs use
+    /// (clamped per model); `reasoning_idx` only tracks the display position
+    /// for the currently selected model.
+    pub reasoning: ReasoningLevel,
     pub prompt_idx: usize,
     /// Index into [`State::task_prompts`] (the Task pane's list).
     pub task_prompt_idx: usize,
@@ -427,36 +432,45 @@ impl State {
 
     pub fn visible_reasoning_levels(&self) -> Vec<ReasoningLevel> {
         match self.selected_model() {
-            Some(m) if !m.capabilities.reasoning => vec![ReasoningLevel::Off],
-            Some(m) => match &m.capabilities.reasoning_levels {
-                Some(levels) if levels.is_empty() => vec![ReasoningLevel::Off],
-                Some(levels) => levels.clone(),
-                None => ReasoningLevel::ALL.to_vec(),
-            },
+            Some(m) => levels_for(m),
             None => vec![ReasoningLevel::Off],
         }
     }
 
+    /// The effective reasoning level for the selected model: the stored
+    /// choice, clamped to what the model actually offers (its first level
+    /// when the choice is unsupported — never a hard fallback to off).
     pub fn selected_reasoning(&self) -> ReasoningLevel {
         let levels = self.visible_reasoning_levels();
-        levels
-            .get(self.setup.reasoning_idx.min(levels.len().saturating_sub(1)))
-            .copied()
-            .unwrap_or(ReasoningLevel::Off)
+        if levels.contains(&self.setup.reasoning) {
+            self.setup.reasoning
+        } else {
+            levels.first().copied().unwrap_or(ReasoningLevel::Off)
+        }
     }
 
-    /// Snap the reasoning selection to the model's persisted default (when
-    /// one exists and the model supports it).
+    /// Re-seat the reasoning selection for the current model: a pinned
+    /// default seats the selection on fresh visits; otherwise the user's
+    /// last chosen level is kept for display. The stored choice is never
+    /// lost here — only `reasoning_idx` moves.
     pub fn snap_reasoning_to_default(&mut self) {
         let Some(model) = self.selected_model() else {
             return;
         };
-        let Some(level) = self.prefs.model_defaults.get(&model.id).copied() else {
-            return;
-        };
         let levels = self.visible_reasoning_levels();
-        if let Some(idx) = levels.iter().position(|l| *l == level) {
+        // A freshly selected model with a pinned default seats on it.
+        if let Some(level) = self.prefs.model_defaults.get(&model.id).copied() {
+            if let Some(idx) = levels.iter().position(|l| *l == level) {
+                self.setup.reasoning_idx = idx;
+                self.setup.reasoning = level;
+                return;
+            }
+        }
+        // Otherwise keep the user's choice when the model supports it.
+        if let Some(idx) = levels.iter().position(|l| *l == self.setup.reasoning) {
             self.setup.reasoning_idx = idx;
+        } else {
+            self.setup.reasoning_idx = 0;
         }
     }
 
@@ -464,6 +478,17 @@ impl State {
     /// or "whatever the current selection says".
     pub fn default_reasoning_for(&self, model_id: &str) -> Option<ReasoningLevel> {
         self.prefs.model_defaults.get(model_id).copied()
+    }
+
+    /// Reasoning for one bulk spec: the model's pinned default when set,
+    /// otherwise the user's last chosen level — always clamped to what the
+    /// model supports. Shared by the bulk-confirmation modal and the launch
+    /// so the on-screen preview can never disagree with the runs.
+    pub fn bulk_reasoning_for(&self, spec: &BulkSpec) -> ReasoningLevel {
+        let level = self
+            .default_reasoning_for(&spec.model_id)
+            .unwrap_or(self.setup.reasoning);
+        level.clamp_to(Some(&levels_for(&spec.model)))
     }
 
     /// Selected model row in the reasoning map (filter-aware).
@@ -663,6 +688,20 @@ fn provider_row_index(state: &State, registry_idx: usize) -> Option<usize> {
         .into_iter()
         .filter(|r| r.group.is_none())
         .position(|r| r.registry_idx == registry_idx)
+}
+
+/// Levels a model actually offers, per its capabilities declaration — the
+/// same semantics as the setup pane: no reasoning → off only; empty
+/// declaration → off only; no declaration → all levels.
+fn levels_for(model: &ModelInfo) -> Vec<ReasoningLevel> {
+    if !model.capabilities.reasoning {
+        return vec![ReasoningLevel::Off];
+    }
+    match &model.capabilities.reasoning_levels {
+        Some(levels) if levels.is_empty() => vec![ReasoningLevel::Off],
+        Some(levels) => levels.clone(),
+        None => ReasoningLevel::ALL.to_vec(),
+    }
 }
 
 /// One (provider, model) pair from the bulk selection, resolved to a model
