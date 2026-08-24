@@ -81,6 +81,7 @@ pub async fn run_allowlisted(
     argv: &[String],
     allowed: &[String],
     jail_root: &Path,
+    cwd: &Path,
     tmp_dir: &Path,
     home_dir: &Path,
     timeout: Duration,
@@ -90,6 +91,13 @@ pub async fn run_allowlisted(
     let Some(program) = argv.first() else {
         return Err(CoreError::Sandbox("argv must not be empty".into()));
     };
+    // The caller resolves `cwd` inside the jail; refuse anything else.
+    if !cwd.starts_with(jail_root) {
+        return Err(CoreError::Sandbox(format!(
+            "cwd escapes the workspace: {:?}",
+            cwd
+        )));
+    }
     let resolved = resolve_binary(program, allowed)?;
 
     std::fs::create_dir_all(tmp_dir)?;
@@ -168,7 +176,7 @@ pub async fn run_allowlisted(
             jail_root.to_string_lossy().to_string(),
             jail_root.to_string_lossy().to_string(),
             "--chdir".into(),
-            jail_root.to_string_lossy().to_string(),
+            cwd.to_string_lossy().to_string(),
             "--".into(),
             resolved.to_string_lossy().to_string(),
         ]);
@@ -177,7 +185,7 @@ pub async fn run_allowlisted(
     } else {
         cmd.args(&argv[1..]);
     }
-    cmd.current_dir(jail_root)
+    cmd.current_dir(cwd)
         .env_clear()
         .env("PATH", &child_path)
         .env("HOME", home_dir)
@@ -519,6 +527,7 @@ mod tests {
             argv,
             &["node".to_string()],
             dir,
+            dir,
             &dir.join("t"),
             &dir.join("h"),
             timeout,
@@ -534,6 +543,7 @@ mod tests {
         let err = run_allowlisted(
             &["curl".to_string(), "http://evil".to_string()],
             &["node".to_string()],
+            tmp.path(),
             tmp.path(),
             &tmp.path().join("t"),
             &tmp.path().join("h"),

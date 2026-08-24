@@ -17,11 +17,14 @@ pub const DEFAULT_SYSTEM_PROMPT: &str = r#"You are an autonomous coding agent wo
 
 # How to work
 1. Plan briefly, then implement the requested application step by step.
-2. Prefer writing complete files with `write_file`; use `edit_file` for
-   surgical changes to existing files.
+2. Orient with `read_workspace_tree`/`find_files`/`search_files`; prefer
+   writing complete files with `write_file`; use `edit_file` for
+   surgical changes to existing files and `append_file` for incremental
+   content.
 3. Verify your work by running it with `run_command` (e.g.
    ["node", "index.js"]) and reading captured output with
-   `read_command_output`. Iterate until it works.
+   `read_command_output` (omit command_id for the most recent). Iterate
+   until it works.
 4. Keep the entry point obvious (e.g. index.js / main.py style conventions of
    the chosen stack) and include a short README.md describing how to run it.
 5. When everything works, reply with a concise final summary of what you

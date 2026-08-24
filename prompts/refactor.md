@@ -7,8 +7,10 @@ workspace WITHOUT changing its observable behavior.
 
 Rules:
 - Work only inside the workspace; escaping it is blocked and logged.
-- Use only the provided tools (read_file/write_file/edit_file/list_directory/
-  create_directory/run_command/read_command_output).
+- Use only the provided tools (read_file/read_files/write_file/append_file/
+  edit_file/list_directory/find_files/search_files/read_workspace_tree/
+  create_directory/move_file/copy_file/get_file_info/run_command/
+  read_command_output).
 - Only allowlisted commands may run (e.g. node, npm, git, grep, python3), passed as argv arrays;
   no shell features (pipes/redirections) exist.
 - After each meaningful change, verify behavior by running the program or its

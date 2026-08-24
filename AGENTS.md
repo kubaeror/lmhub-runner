@@ -7,7 +7,7 @@ never break.
 ## What this is
 
 A Rust workspace (`lmhub-runner` binary) that runs LLMs as **coding agents**:
-a model gets a public system prompt + 7 tools and works inside a sandboxed
+a model gets a public system prompt + 15 tools and works inside a sandboxed
 workspace. A ratatui TUI drives provider/model/reasoning selection, live runs
 and history. The bundled catalog covers all 194 providers from models.dev.
 
@@ -35,7 +35,7 @@ belongs to the TUI). `LMHUB_CONFIG_DIR`/`LMHUB_CACHE_DIR`/`LMHUB_OUTPUT_DIR`/
 | `crates/core` | domain types (`ReasoningLevel`, `ChatMessage`, `ChatRequest/Response`), the `Provider` trait, `StatisticsDocument`/`RunEvent` schemas, `AuthStore`, redaction engine, `AppConfig` |
 | `crates/modelsdev` | models.dev client, TTL cache, `reasoning_options` → `ReasoningLevel` mapping, pricing lookup |
 | `crates/providers` | native adapters (openai, anthropic, azure, gemini, bedrock, vertex, cohere, copilot), `RoutedProvider` for the catalog long tail, registry, SigV4/JWT/device-flow, SSE runners, retry policy, custom-TOML parsing |
-| `crates/sandbox` | `PathJail`, `run_allowlisted` process runner (rlimits, seccomp, bwrap), the 7 tools, `detect_runtime` |
+| `crates/sandbox` | `PathJail`, `run_allowlisted` process runner (rlimits, seccomp, bwrap), the 15 tools, `detect_runtime` |
 | `crates/agent` | `execute(RunSpec, ui_tx)` agent loop, `EventSink`, cost computation |
 | `crates/tui` | Elm-style `State`/`Action`/`reduce` core, keymap, views |
 | `xtask` | `gen-providers` snapshot regeneration |

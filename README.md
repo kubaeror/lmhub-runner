@@ -139,17 +139,25 @@ id-prefix heuristic.
 
 ## Tools
 
-The agent gets exactly 7 tools, executed inside the workspace jail:
+The agent gets 15 tools, executed inside the workspace jail:
 
 | Tool                  | Behavior                                                            |
 |-----------------------|---------------------------------------------------------------------|
 | `list_directory`      | directory listing (dirs as `name/`, files with size); capped at 500 entries |
 | `read_file`           | paged reads (`offset_line`, `max_bytes`), server-enforced cap, truncated-marker on overflow |
+| `read_files`          | first page of up to 10 files in one call (per-file cap)             |
 | `write_file`          | full-content writes (byte cap), parent dirs auto-created            |
+| `append_file`         | append (created if missing), newline-aligned by default, size-capped |
 | `edit_file`           | exact-substring replacement; must match uniquely unless `replace_all` |
 | `create_directory`    | `mkdir -p` inside the workspace                                    |
-| `run_command`         | allowlisted command as an **argv array** (no shell), per-command timeout |
-| `read_command_output` | captured stdout/stderr tail of the last command                    |
+| `move_file`           | rename a file/dir inside the workspace (parents auto-created)       |
+| `copy_file`           | copy a file inside the workspace (size-capped)                      |
+| `get_file_info`       | type/size/mtime/permissions of one path                             |
+| `find_files`          | glob name search (`**/*.test.ts` works)                             |
+| `search_files`        | substring content search (`path:line: content`, case flag, capped)  |
+| `read_workspace_tree` | recursive tree (depth/entry-capped) for orientation                 |
+| `run_command`         | allowlisted command as an **argv array** (no shell), optional `cwd`, per-command timeout |
+| `read_command_output` | captured stdout/stderr of a recent command (`command_id` — last 5 retained) |
 
 `run_command` is argv-only — no shell, so pipes, redirects, globs and `&&`
 do not work. Violations are blocked, logged and counted as failures.
@@ -335,7 +343,7 @@ crates/core        domain types, Provider trait, statistics/event schemas,
 crates/modelsdev   models.dev client + local cache + pricing lookup
 crates/providers   native + routed adapters (194-provider catalog), model
                    resolution chain, SigV4/JWT/device-flow helpers
-crates/sandbox     path jail, allowlisted process runner, the 7 tools,
+crates/sandbox     path jail, allowlisted process runner, the 15 tools,
                    bwrap/seccomp runtime detection
 crates/agent       agent loop, event sink, cost computation
 crates/tui         ratatui interface — Elm-style State/Action/reduce core,
