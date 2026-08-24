@@ -3,7 +3,7 @@
 ┌ Providers ──────────────────┐ │GPT-4o                            ││model   gpt-4o                │
 │── NATIVE ──                 │↑│GPT-4o mini                       ││family  GPT                   │
 │Amazon Bedrock [no key]      │█│GPT-4.1                           │└──────────────────────────────┘
-│Anthropic [no key]           │█│                                  │┌ Reasoning (★default, d=set) ─┐
+│Anthropic [no key]           │█│                                  │┌ Reasoning (↑/↓ per model, ★=s┐
 │Azure [no key]               │║│                                  ││[off] [low] [high★]           │
 │Azure Cognitive Services [no │║│                                  │└──────────────────────────────┘
 │Cohere [no key]              │║│                                  │┌ System prompts (d=set default┐

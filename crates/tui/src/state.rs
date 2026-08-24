@@ -349,6 +349,17 @@ impl State {
                 state.setup.provider_idx = provider_row_index(&state, idx).unwrap_or(0);
             }
         }
+        // The setup arrows set reasoning per model; `setup.reasoning` stays the
+        // fallback for models without an explicit setting — seed it from the
+        // last used level so untouched models get a sensible default.
+        if let Some(lvl) = state
+            .prefs
+            .last_reasoning
+            .as_deref()
+            .and_then(lmhub_core::ReasoningLevel::parse_effort)
+        {
+            state.setup.reasoning = lvl;
+        }
         state
     }
 

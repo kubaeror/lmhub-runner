@@ -61,14 +61,26 @@ impl State {
             Action::CycleReasoning(delta) => {
                 let levels = self.visible_reasoning_levels();
                 let len = levels.len().max(1);
-                self.setup.reasoning_idx =
-                    (self.setup.reasoning_idx as i32 + delta).rem_euclid(len as i32) as usize;
-                // Record the chosen level model-independently so it survives
-                // navigation and applies to bulk runs.
-                self.setup.reasoning = *levels
-                    .get(self.setup.reasoning_idx)
-                    .unwrap_or(&lmhub_core::ReasoningLevel::Off);
-                Vec::new()
+                // Cycle the *focused model's* own level: start from its
+                // per-model setting (or the global fallback when none), never
+                // from another model's level. The global fallback
+                // (`setup.reasoning`) is left untouched so arrows edit only
+                // the selected model and persist per model.
+                let current = self
+                    .selected_model()
+                    .and_then(|m| self.default_reasoning_for(&m.id))
+                    .unwrap_or(self.setup.reasoning);
+                let start = levels.iter().position(|l| *l == current).unwrap_or(0);
+                let idx = (start as i32 + delta).rem_euclid(len as i32) as usize;
+                let level = levels
+                    .get(idx)
+                    .copied()
+                    .unwrap_or(lmhub_core::ReasoningLevel::Off);
+                self.setup.reasoning_idx = idx;
+                if let Some(model) = self.selected_model() {
+                    self.prefs.model_defaults.insert(model.id.clone(), level);
+                }
+                vec![Effect::SavePrefs]
             }
             Action::CyclePrompt(delta) => {
                 let len = self.prompts.len().max(1);

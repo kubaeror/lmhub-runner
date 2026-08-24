@@ -3,7 +3,7 @@
 ┌ Providers ───────────────────┐│GPT-4o                            ││model   gpt-4o                │
 │Groq [no key]                 ││GPT-4o mini                       ││family  GPT                   │
 │                              ││GPT-4.1                           │└──────────────────────────────┘
-│                              ││                                  │┌ Reasoning (★default, d=set) ─┐
+│                              ││                                  │┌ Reasoning (↑/↓ per model, ★=s┐
 │                              ││                                  ││[off] [low] [high★]           │
 │                              ││                                  │└──────────────────────────────┘
 │                              ││                                  │┌ System prompts (d=set default┐

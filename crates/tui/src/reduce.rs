@@ -436,24 +436,42 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_choice_survives_model_switch() {
+    fn reasoning_is_set_per_model_in_setup() {
         let (mut state, _dir) = crate::testutil::test_state();
         state.setup.models = vec![reasoning_model("gpt-4o"), reasoning_model("gpt-4o-mini")];
         state.setup.model_idx = 0;
         state.setup.focus = crate::state::Pane::Models;
-        state.reduce(Action::CycleReasoning(2)); // high
+        // Arrows edit only the focused model.
+        state.reduce(Action::CycleReasoning(2)); // gpt-4o → high
+        assert_eq!(
+            state.prefs.model_defaults.get("gpt-4o"),
+            Some(&lmhub_core::ReasoningLevel::High)
+        );
+        assert_eq!(
+            state.prefs.model_defaults.get("gpt-4o-mini"),
+            None,
+            "other model untouched"
+        );
         assert_eq!(state.selected_reasoning(), lmhub_core::ReasoningLevel::High);
-        // Navigating to another model must keep the chosen level.
+        // Navigating to another model shows its own (fallback) level.
         state.reduce(Action::MoveSelection(1));
         assert_eq!(
-            state.setup.reasoning_idx, 2,
-            "display follows the kept level"
+            state.selected_reasoning(),
+            lmhub_core::ReasoningLevel::Off,
+            "mini has no explicit setting → global fallback"
         );
+        state.reduce(Action::CycleReasoning(1)); // gpt-4o-mini → low
+        assert_eq!(
+            state.prefs.model_defaults.get("gpt-4o-mini"),
+            Some(&lmhub_core::ReasoningLevel::Low)
+        );
+        // Back to the first model: its own level is retained.
+        state.reduce(Action::MoveSelection(-1));
         assert_eq!(state.selected_reasoning(), lmhub_core::ReasoningLevel::High);
     }
 
     #[test]
-    fn bulk_run_uses_chosen_reasoning_after_navigation() {
+    fn bulk_run_uses_each_models_own_reasoning_after_navigation() {
         let (mut state, _dir) = crate::testutil::test_state();
         seed_catalog(&mut state, "openai", &["gpt-4o", "gpt-4o-mini"]);
         state.setup.models = vec![reasoning_model("gpt-4o"), reasoning_model("gpt-4o-mini")];
@@ -463,22 +481,20 @@ mod tests {
             ("openai".into(), "gpt-4o-mini".into()),
         ]);
         state.setup.focus = crate::state::Pane::Models;
-        state.reduce(Action::CycleReasoning(2)); // high
-                                                 // Land on a different model: the old bug degraded the bulk fallback
-                                                 // to off here (reasoning was derived from the *current* model).
+        state.reduce(Action::CycleReasoning(2)); // gpt-4o → high
         state.reduce(Action::MoveSelection(1));
+        state.reduce(Action::CycleReasoning(1)); // gpt-4o-mini → low
+        state.reduce(Action::MoveSelection(-1)); // back on gpt-4o: no clobber
         state.reduce(Action::BulkStart);
         state.reduce(Action::ConfirmBulkStart);
-        assert!(
-            state.runs.runs.iter().all(|r| r.reasoning == "high"),
-            "chosen reasoning must reach every bulk run: {:?}",
-            state
-                .runs
-                .runs
-                .iter()
-                .map(|r| (r.model_id.as_str(), r.reasoning.as_str()))
-                .collect::<Vec<_>>()
-        );
+        let by_model: std::collections::BTreeMap<String, String> = state
+            .runs
+            .runs
+            .iter()
+            .map(|r| (r.model_id.clone(), r.reasoning.clone()))
+            .collect();
+        assert_eq!(by_model["gpt-4o"], "high");
+        assert_eq!(by_model["gpt-4o-mini"], "low");
     }
 
     #[test]
@@ -537,7 +553,7 @@ mod tests {
     }
 
     #[test]
-    fn bulk_navigation_keeps_chosen_level_across_pinned_default() {
+    fn bulk_navigation_keeps_each_models_level_across_pinned_default() {
         let (mut state, _dir) = crate::testutil::test_state();
         seed_catalog(
             &mut state,
@@ -551,7 +567,7 @@ mod tests {
         ];
         seed_task_prompts(&mut state, &["build"]);
         // gpt-4o-mini carries a pinned default; navigating onto it must not
-        // clobber the chosen level used as the bulk fallback elsewhere.
+        // clobber any other model's own level.
         state
             .prefs
             .model_defaults
@@ -562,14 +578,23 @@ mod tests {
             ("openai".into(), "gpt-4o-turbo".into()),
         ]);
         state.setup.focus = crate::state::Pane::Models;
-        state.reduce(Action::CycleReasoning(2)); // chosen: high
-                                                 // Land on the pinned model and then off again (bulk navigation).
-        state.reduce(Action::MoveSelection(1));
+        state.reduce(Action::CycleReasoning(2)); // gpt-4o → high
+        state.reduce(Action::MoveSelection(2)); // jump over the pinned model
+        state.reduce(Action::CycleReasoning(1)); // gpt-4o-turbo → low
+                                                 // Land on the pinned model and off again: nothing clobbered.
+        state.reduce(Action::MoveSelection(-1));
         state.reduce(Action::MoveSelection(-1));
         assert_eq!(
-            state.setup.reasoning,
-            lmhub_core::ReasoningLevel::High,
-            "chosen level survives navigation over a pinned default"
+            state.prefs.model_defaults.get("gpt-4o"),
+            Some(&lmhub_core::ReasoningLevel::High)
+        );
+        assert_eq!(
+            state.prefs.model_defaults.get("gpt-4o-mini"),
+            Some(&lmhub_core::ReasoningLevel::Low)
+        );
+        assert_eq!(
+            state.prefs.model_defaults.get("gpt-4o-turbo"),
+            Some(&lmhub_core::ReasoningLevel::Low)
         );
         state.reduce(Action::BulkStart);
         state.reduce(Action::ConfirmBulkStart);
@@ -579,15 +604,9 @@ mod tests {
             .iter()
             .map(|r| (r.model_id.clone(), r.reasoning.clone()))
             .collect();
-        assert_eq!(by_model["gpt-4o"], "high", "chosen level applies");
-        assert_eq!(
-            by_model["gpt-4o-mini"], "low",
-            "pinned default wins per model"
-        );
-        assert_eq!(
-            by_model["gpt-4o-turbo"], "high",
-            "chosen level survives for others"
-        );
+        assert_eq!(by_model["gpt-4o"], "high");
+        assert_eq!(by_model["gpt-4o-mini"], "low");
+        assert_eq!(by_model["gpt-4o-turbo"], "low");
     }
 
     #[test]

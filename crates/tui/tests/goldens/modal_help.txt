@@ -3,7 +3,7 @@
 ┌ Providers ──────────────────┐ │GPT-4o                            ││model   gpt-4o                │
 │── NATIVE ──                 │↑│GPT-4o mini                       ││family  GPT                   │
 │Amazon Bedrock┌ Keybindings (? closes) ────────────────────────────────────────────┐──────────────┘
-│Anthropic [no │── Global ──                                                        │ault, d=set) ─┐
+│Anthropic [no │── Global ──                                                        │per model, ★=s┐
 │Azure [no key]│  ?                help                                             │h★]           │
 │Azure Cognitiv│  :                command palette                                  │──────────────┘
 │Cohere [no key│  Tab              next tab                                         │(d=set default┐

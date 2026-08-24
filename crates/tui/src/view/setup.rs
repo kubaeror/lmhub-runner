@@ -357,9 +357,9 @@ fn draw_reasoning(f: &mut Frame, state: &State, area: ratatui::layout::Rect) {
         })
         .collect();
     let title = if default.is_some() {
-        " Reasoning (★default, d=set) "
+        " Reasoning (↑/↓ per model, ★=set) "
     } else {
-        " Reasoning (d=set default) "
+        " Reasoning (↑/↓ per model) "
     };
     f.render_widget(
         Paragraph::new(Line::from(spans)).block(bordered_block(

@@ -3,13 +3,13 @@
 ┌ Providers ──────────────────┐ │GPT-4o                            ││model   gpt-4o                │
 │── NATIVE ──                 │↑│GPT-4o mini                       ││family  GPT                   │
 │Amazon Bedrock [no key]      │█│GPT-4.1                           │└──────────────────────────────┘
-│Anthropic [no key]           │█│                                  │┌ Reasoning (★default, d=set) ─┐
+│Anthropic [no key]           │█│                                  │┌ Reasoning (↑/↓ per model, ★=s┐
 │Azure [no key]               │║│                                  ││[off] [low] [high★]           │
 │Azure Cognitive Servi┌ Bulk launch — 2 runs (y/Enter = launch) ────────────┐──────────────────────┘
 │Cohere [no key]      │─ openai                                             │prompts (d=set default┐
 │GitHub Copilot [no ke│  • gpt-4o  [high]                                   │t                     │
 │GitLab Duo [no key]  │  • gpt-4o-mini  [off]                               │                      │
-│Google [no key]      │reasoning: off (★ per-model defaults override)       │                      │
+│Google [no key]      │fallback reasoning: off (set per model with ↑/↓)     │                      │
 │OpenAI [no key] ☑2   │                                                     │                      │
 │Vertex [no key]      │pricing unknown for these routes — costs will be null│                      │
 │Vertex (Anthropic) [n│                                                     │                      │

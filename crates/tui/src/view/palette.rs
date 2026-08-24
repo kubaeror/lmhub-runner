@@ -158,7 +158,7 @@ fn draw_bulk_confirm(f: &mut Frame, state: &State) {
     }
     lines.push(Line::from(Span::styled(
         format!(
-            "reasoning: {} (★ per-model defaults override)",
+            "fallback reasoning: {} (set per model with ↑/↓)",
             state.setup.reasoning.as_str()
         ),
         Style::default().fg(Color::DarkGray),
