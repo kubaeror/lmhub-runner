@@ -3,7 +3,7 @@
 //! Avoids the multi-crate AWS SDK; verified against the official AWS test
 //! vector `get-vanilla-query-order-key-case` from the SigV4 test suite.
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 
 type HmacSha256 = Hmac<Sha256>;
