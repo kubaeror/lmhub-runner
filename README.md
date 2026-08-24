@@ -55,19 +55,21 @@ The interactive TUI starts — no CLI flags. The tabs are:
    pretty-printed (tokens, performance, tool calls, pricing — not raw JSON).
 
 `:` opens the command palette (run, bulk run, cancel all, rescan history,
-open output dir, quit). Mouse clicks focus panes and switch tabs. Last
-selections, favorites, per-model reasoning defaults, the last task prompt
-and the concurrency cap persist in `~/.config/lmhub/ui.json`.
+open output dir, quit); `?` opens the keybinding help overlay. Mouse clicks
+focus panes, select list rows and switch tabs; the mouse wheel scrolls
+lists and the transcript. Last selections, favorites, per-model reasoning
+defaults, the last task prompt and the concurrency cap persist in
+`~/.config/lmhub/ui.json`.
 
 ### Keybindings
 
 | Screen    | Keys                                                                                  |
 |-----------|---------------------------------------------------------------------------------------|
-| Global    | `Ctrl-C`/`Ctrl-Q` always quit (first press cancels runs, second forces), `:` palette, `Tab` next tab, mouse |
+| Global    | `Ctrl-C`/`Ctrl-Q` always quit (first press cancels runs, second forces), `?` help, `:` palette, `Tab` next tab, mouse click + wheel |
 | Setup     | `←`/`→` pane, type=search providers (`q` is a filter char here; `Backspace` deletes), `↑`/`↓` select, `Enter` connect/key, `F` favorite, `m` multi-select, `Space` toggle bulk, `C` clear bulk, `x` bulk-run, `F5` force-reload models, `r` reload models, `d` pin reasoning default / default prompt / default task prompt |
 | Task      | `↑`/`↓` select task prompt, `Ctrl+Enter` run, `d` set default task prompt, `x` bulk-run |
 | Run       | `[`/`]` previous/next session, `↑`/`↓` scroll transcript, `c` cancel session, `C` cancel all, `R` rerun, `v` raw feed, `Enter` run detail |
-| History   | `↑`/`↓` select, `Enter` detail, `F5` rescan                                            |
+| History   | `↑`/`↓` select, `Enter` detail (scrollable with `↑`/`↓`/wheel), `F5` rescan  |
 | Reasoning | type=filter (`q` is a filter char), `↑`/`↓` select, `D` cycle ★ default, `Esc` clear, `F5` reload snapshot   |
 
 ### Credentials & prompts

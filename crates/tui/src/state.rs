@@ -30,10 +30,12 @@ pub enum Modal {
     },
     /// Command palette with live filter + selection.
     Palette { filter: EditField, cursor: usize },
+    /// Keybinding help overlay.
+    Help,
     /// Confirmation of a bulk launch (N models across providers).
     BulkConfirm,
-    /// Pretty-printed statistics of a previous run.
-    HistoryDetail(String),
+    /// Pretty-printed statistics of a previous run (scrollable).
+    HistoryDetail { text: String, scroll: usize },
     /// Outcome of a session (final text, paths).
     RunDetail { run_id: u64 },
 }

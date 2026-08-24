@@ -1,28 +1,28 @@
  [1] Setup │ [2] Run │ [3] History │ [4] Reasoning                                                  
 ┌ Previous runs — family/model/reasoning/status/ms/tokens/$ (Enter = statistics) ──────────────────┐
 │GPT        gpt-4o                       high    completed       60000ms  tokens 12000      0.00123│
-│              ┌ statistics (Esc closes) ───────────────────────────────────────────┐              │
-│              │run      : abc123                                                   │              │
-│              │status   : completed                                                │              │
-│              │provider : openai (native-openai)                                   │              │
-│              │family   : GPT                                                      │              │
-│              │model    : gpt-4o                                                   │              │
-│              │reasoning: high                                                     │              │
-│              │started  : 2026-08-24T00:00:00Z                                     │              │
-│              │finished : 2026-08-24T00:01:00Z                                     │              │
-│              │duration : 60000 ms                                                 │              │
-│              │                                                                    │              │
-│              │— tokens —                                                          │              │
-│              │input 1000/output 200                                               │              │
-│              │reasoning 50 · cache-read 400 · cache-write 0                       │              │
-│              │total 1200 · cache-hit 0.4000                                       │              │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│              ┌ statistics (Esc closes, ↑/↓ scroll) ───────────────────────────────┐              │
+│              │run      : abc123                                                   ↑              │
+│              │status   : completed                                                █              │
+│              │provider : openai (native-openai)                                   █              │
+│              │family   : GPT                                                      █              │
+│              │model    : gpt-4o                                                   █              │
+│              │reasoning: high                                                     █              │
+│              │started  : 2026-08-24T00:00:00Z                                     █              │
+│              │finished : 2026-08-24T00:01:00Z                                     ║              │
+│              │duration : 60000 ms                                                 ║              │
+│              │                                                                    ║              │
+│              │— tokens —                                                          ║              │
+│              │input 1000/output 200                                               ║              │
+│              │reasoning 50 · cache-read 400 · cache-write 0                       ║              │
+│              │total 1200 · cache-hit 0.4000                                       ↓              │
 │              └────────────────────────────────────────────────────────────────────┘              │
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
-  ↑/↓ select  Enter detail  F5 rescan  : palette  q quit                                            
+  ↑/↓ select run  Enter statistics detail  F5 rescan  ? help  : palette                             

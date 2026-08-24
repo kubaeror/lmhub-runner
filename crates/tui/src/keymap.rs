@@ -28,6 +28,7 @@ pub fn dispatch(state: &State, key: KeyEvent) -> Option<Action> {
         // search / reasoning map), where `q` is a filter character.
         KeyCode::Char('q') if !is_filter_context(state) => return Some(quit_action(state)),
         KeyCode::Char(':') => return Some(Action::OpenPalette),
+        KeyCode::Char('?') => return Some(Action::OpenHelp),
         KeyCode::Tab => {
             return Some(Action::SwitchScreen(state.screen.cycle(true)));
         }
@@ -95,8 +96,16 @@ fn modal_keys(modal: &Modal, key: KeyEvent) -> Option<Action> {
             }
             _ => None,
         },
-        Modal::HistoryDetail(_) => match key.code {
+        Modal::Help => match key.code {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('?') => {
+                Some(Action::CloseModal)
+            }
+            _ => None,
+        },
+        Modal::HistoryDetail { .. } => match key.code {
             KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => Some(Action::CloseModal),
+            KeyCode::Up => Some(Action::ScrollHistoryDetail(1)),
+            KeyCode::Down => Some(Action::ScrollHistoryDetail(-1)),
             _ => None,
         },
         Modal::RunDetail { .. } => match key.code {

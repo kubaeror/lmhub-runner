@@ -25,4 +25,4 @@
 │                                                                                                  │
 │                                                                                                  │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
-  type=filter  ↑/↓ select  D cycle default (★)  Esc clear  F5 reload  : palette  Ctrl-C quit        
+  type filter models  ↑/↓ select  D cycle default reasoning (★)  Esc clear filter  F5 reload snapsh…

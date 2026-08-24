@@ -24,10 +24,12 @@ impl State {
             | Action::ForceQuit
             | Action::SwitchScreen(_)
             | Action::OpenPalette
+            | Action::OpenHelp
             | Action::CloseModal
             | Action::Notice(_)
             | Action::UiMsg(_)
             | Action::Paste(_)
+            | Action::ScrollHistoryDetail(_)
             | Action::PaletteChar(_)
             | Action::PaletteBackspace
             | Action::PaletteMove(_)
@@ -83,6 +85,19 @@ impl State {
             | Action::CycleModelDefault
             | Action::SetModelDefault
             | Action::ReloadSnapshot => self.reduce_map(action),
+
+            // ---- mouse row selection (routed to the owning screen) ------------
+            Action::MouseSelectRow { target, .. } => match target {
+                crate::action::SelectTarget::Providers | crate::action::SelectTarget::Models => {
+                    self.reduce_setup(action)
+                }
+                crate::action::SelectTarget::Sessions => self.reduce_run(action),
+                crate::action::SelectTarget::History => self.reduce_history(action),
+                crate::action::SelectTarget::Map => self.reduce_map(action),
+            },
+
+            // ---- mouse wheel over a setup pane --------------------------------
+            Action::MouseWheelSetup { .. } => self.reduce_setup(action),
         }
     }
 }

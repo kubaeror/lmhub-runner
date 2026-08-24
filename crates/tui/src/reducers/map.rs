@@ -32,6 +32,15 @@ impl State {
                 self.snapshot_all = None;
                 vec![Effect::LoadSnapshot]
             }
+            Action::MouseSelectRow {
+                target: crate::action::SelectTarget::Map,
+                idx,
+            } => {
+                if !self.map_rows().is_empty() {
+                    self.map.idx = idx.min(self.map_rows().len() - 1);
+                }
+                Vec::new()
+            }
             _ => Vec::new(),
         }
     }

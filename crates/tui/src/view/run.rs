@@ -3,6 +3,7 @@
 
 use crate::state::{RunSession, RunSessionStatus, State};
 use crate::view::shared::*;
+use crate::view::RenderInfo;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -11,7 +12,7 @@ use ratatui::{
     Frame,
 };
 
-pub fn draw(f: &mut Frame, state: &State, area: Rect, panes: &mut [Rect; 2]) {
+pub fn draw(f: &mut Frame, state: &State, area: Rect, info: &mut RenderInfo) {
     if state.runs.runs.is_empty() {
         f.render_widget(
             Paragraph::new(
@@ -28,18 +29,18 @@ pub fn draw(f: &mut Frame, state: &State, area: Rect, panes: &mut [Rect; 2]) {
         .split(area);
     let cols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(28), Constraint::Min(1)])
+        .constraints([Constraint::Max(28), Constraint::Min(1)])
         .split(chunks[0]);
 
-    panes[0] = cols[0];
-    panes[1] = cols[1];
+    info.run_panes[0] = cols[0];
+    info.run_panes[1] = cols[1];
 
-    draw_sessions(f, state, cols[0]);
-    draw_transcript(f, state, cols[1]);
+    draw_sessions(f, state, cols[0], info);
+    draw_transcript(f, state, cols[1], info);
     draw_stats(f, state, chunks[1]);
 }
 
-fn draw_sessions(f: &mut Frame, state: &State, area: Rect) {
+fn draw_sessions(f: &mut Frame, state: &State, area: Rect, info: &mut RenderInfo) {
     let items: Vec<ListItem> = state
         .runs
         .runs
@@ -83,6 +84,7 @@ fn draw_sessions(f: &mut Frame, state: &State, area: Rect) {
             ]))
         })
         .collect();
+    let total = items.len();
     let list = List::new(items)
         .block(bordered_block(
             " Sessions ([/]) ",
@@ -93,15 +95,18 @@ fn draw_sessions(f: &mut Frame, state: &State, area: Rect) {
                 .bg(Color::DarkGray)
                 .add_modifier(Modifier::BOLD),
         );
+    let (list_area, bar_area) = scrollbar_area(area, total);
     let mut st = ListState::default().with_selected(Some(state.runs.selected));
-    f.render_stateful_widget(list, area, &mut st);
+    f.render_stateful_widget(list, list_area, &mut st);
+    info.offsets.sessions = st.offset();
+    render_scrollbar(f, bar_area, total, st.offset());
 }
 
-fn draw_transcript(f: &mut Frame, state: &State, area: Rect) {
+fn draw_transcript(f: &mut Frame, state: &State, area: Rect, info: &mut RenderInfo) {
     let Some(run) = state.runs.selected_run() else {
         return;
     };
-    let max_w = area.width.saturating_sub(4) as usize;
+    let max_w = area.width.saturating_sub(5) as usize;
     let all_lines = transcript_lines(run, max_w.max(20));
 
     let max_lines = area.height.saturating_sub(2) as usize;
@@ -120,11 +125,20 @@ fn draw_transcript(f: &mut Frame, state: &State, area: Rect) {
     let inner = Rect {
         x: area.x + 1,
         y: area.y + 1,
-        width: area.width.saturating_sub(2),
+        width: area.width.saturating_sub(3),
         height: area.height.saturating_sub(2),
+    };
+    let bar = Rect {
+        x: area.x + area.width.saturating_sub(1),
+        y: area.y,
+        width: 1,
+        height: area.height,
     };
     f.render_widget(Paragraph::new(visible), inner);
     f.render_widget(block, area);
+    render_scrollbar(f, Some(bar), total, start);
+    info.transcript = start;
+    info.transcript_total = total;
 }
 
 /// All transcript lines (structured turns or raw feed), oldest first.

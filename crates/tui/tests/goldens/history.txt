@@ -25,4 +25,4 @@
 │                                                                                                  │
 │                                                                                                  │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
-  ↑/↓ select  Enter detail  F5 rescan  : palette  q quit                                            
+  ↑/↓ select run  Enter statistics detail  F5 rescan  ? help  : palette                             

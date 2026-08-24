@@ -20,9 +20,18 @@ impl State {
             Action::OpenHistoryDetail => {
                 if let Some(row) = self.history.rows.get(self.history.idx) {
                     match history::read_detail(&row.path) {
-                        Ok(text) => self.modal = Some(Modal::HistoryDetail(text)),
+                        Ok(text) => self.modal = Some(Modal::HistoryDetail { text, scroll: 0 }),
                         Err(e) => self.push_notice(e),
                     }
+                }
+                Vec::new()
+            }
+            Action::MouseSelectRow {
+                target: crate::action::SelectTarget::History,
+                idx,
+            } => {
+                if !self.history.rows.is_empty() {
+                    self.history.idx = idx.min(self.history.rows.len() - 1);
                 }
                 Vec::new()
             }

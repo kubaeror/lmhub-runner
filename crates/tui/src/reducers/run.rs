@@ -90,6 +90,15 @@ impl State {
                 }
                 Vec::new()
             }
+            Action::MouseSelectRow {
+                target: crate::action::SelectTarget::Sessions,
+                idx,
+            } => {
+                if !self.runs.runs.is_empty() {
+                    self.runs.selected = idx.min(self.runs.runs.len() - 1);
+                }
+                Vec::new()
+            }
             _ => Vec::new(),
         }
     }

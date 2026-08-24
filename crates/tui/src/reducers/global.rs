@@ -50,6 +50,17 @@ impl State {
                 });
                 Vec::new()
             }
+            Action::OpenHelp => {
+                self.modal = Some(Modal::Help);
+                Vec::new()
+            }
+            Action::ScrollHistoryDetail(delta) => {
+                if let Some(Modal::HistoryDetail { text, scroll }) = &mut self.modal {
+                    let max = text.lines().count().saturating_sub(1);
+                    *scroll = ((*scroll as i32 + delta).max(0) as usize).min(max);
+                }
+                Vec::new()
+            }
             Action::CloseModal => {
                 self.modal = None;
                 Vec::new()

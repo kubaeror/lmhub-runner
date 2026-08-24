@@ -2,18 +2,16 @@
  search: grok▏  — 1 match       ┌ Models [Models.dev] ─────────────┐┌ Model details ───────────────┐
 ┌ Providers ───────────────────┐│GPT-4o                            ││model   gpt-4o                │
 │Groq [no key]                 ││GPT-4o mini                       ││family  GPT                   │
-│                              ││GPT-4.1                           ││✔ tools   ✔ reasoning   ✔     │
-│                              ││                                  ││cache                         │
-│                              ││                                  ││context 128000 / output 16384 │
-│                              ││                                  ││tokens                        │
-│                              ││                                  ││pricing: not found in         │
-│                              ││                                  │└──────────────────────────────┘
+│                              ││GPT-4.1                           │└──────────────────────────────┘
 │                              ││                                  │┌ Reasoning (★default, d=set) ─┐
 │                              ││                                  ││[off] [low] [high★]           │
 │                              ││                                  │└──────────────────────────────┘
 │                              ││                                  │┌ System prompts (d=set default┐
 │                              ││                                  ││▶ default                     │
 │                              ││                                  ││  expert                      │
+│                              ││                                  ││                              │
+│                              ││                                  ││                              │
+│                              ││                                  ││                              │
 │                              ││                                  ││                              │
 │                              ││                                  ││                              │
 │                              ││                                  ││                              │
@@ -24,5 +22,7 @@
 │                              ││                                  ││                              │
 │                              ││                                  ││                              │
 │                              ││                                  ││                              │
+│                              ││                                  ││                              │
+│                              ││                                  ││                              │
 └──────────────────────────────┘└──────────────────────────────────┘└──────────────────────────────┘
-  type=search providers  ↑/↓ select  Ctrl-Enter run  ←/→ pane  m multi  Space bulk  F favorite  x bu
+  type search providers  ←/→ focus pane  ↑/↓ select  Enter connect / set key  Backspace delete sear…

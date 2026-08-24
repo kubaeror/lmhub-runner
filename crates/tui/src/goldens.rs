@@ -539,8 +539,20 @@ fn goldens_modal_history_detail() {
         "total 1200 · cache-hit 0.4000",
     ]
     .join("\n");
-    state.modal = Some(Modal::HistoryDetail(detail));
+    state.modal = Some(Modal::HistoryDetail {
+        text: detail,
+        scroll: 0,
+    });
     check_golden("modal_history_detail", &state);
+}
+
+#[test]
+fn goldens_modal_help() {
+    let (mut state, _dir) = crate::testutil::test_state();
+    seed_openai(&mut state);
+    state.screen = crate::action::Screen::Setup;
+    state.modal = Some(Modal::Help);
+    check_golden("modal_help", &state);
 }
 
 // ---- reducer-level effect tests -------------------------------------------

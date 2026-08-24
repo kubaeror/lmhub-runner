@@ -13,6 +13,8 @@ pub enum Action {
     ForceQuit,
     SwitchScreen(Screen),
     OpenPalette,
+    /// `?` — open the keybinding help overlay.
+    OpenHelp,
     CloseModal,
     /// A transient status message from a background task.
     Notice(String),
@@ -78,13 +80,25 @@ pub enum Action {
     MapFilter(String),
     MapClear,
     MapMove(i32),
-    /// `d` in the map: cycle the default reasoning for the selected model.
+    /// `d` on the map: cycle the default reasoning for the selected model.
     CycleModelDefault,
     /// `d` in the setup Reasoning pane: pin the current level as the
     /// model's default.
     SetModelDefault,
     /// F5 in the map: reload the Models.dev snapshot.
     ReloadSnapshot,
+    /// Scroll the history-detail modal (`↑`/`↓`, mouse wheel).
+    ScrollHistoryDetail(i32),
+    /// Mouse wheel over a setup pane: focus it and move its selection.
+    MouseWheelSetup {
+        pane: Pane,
+        dir: i32,
+    },
+    /// Mouse click on a list row: focus (when applicable) and select it.
+    MouseSelectRow {
+        target: SelectTarget,
+        idx: usize,
+    },
 
     // ---- palette ---------------------------------------------------------
     PaletteChar(char),
@@ -132,6 +146,16 @@ impl Screen {
         };
         Self::ALL[next]
     }
+}
+
+/// Which list a mouse click targeted (for row selection).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectTarget {
+    Providers,
+    Models,
+    Sessions,
+    History,
+    Map,
 }
 
 /// Side effects returned by `reduce`; executed by the event loop.

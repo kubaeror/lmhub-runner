@@ -115,6 +115,34 @@ impl State {
                 self.save_entered_key();
                 Vec::new()
             }
+            Action::MouseWheelSetup { pane, dir } => {
+                self.setup.focus = pane;
+                match pane {
+                    Pane::Providers => self.move_provider(dir),
+                    Pane::Models => self.move_model(dir),
+                    Pane::Prompts => self.move_prompt(dir),
+                    Pane::Task => self.move_task_prompt(dir),
+                    _ => Vec::new(),
+                }
+            }
+            Action::MouseSelectRow {
+                target: crate::action::SelectTarget::Providers,
+                idx,
+            } => {
+                self.setup.focus = Pane::Providers;
+                self.select_provider(idx)
+            }
+            Action::MouseSelectRow {
+                target: crate::action::SelectTarget::Models,
+                idx,
+            } => {
+                self.setup.focus = Pane::Models;
+                if !self.setup.models.is_empty() {
+                    self.setup.model_idx = idx.min(self.setup.models.len() - 1);
+                    self.snap_reasoning_to_default();
+                }
+                Vec::new()
+            }
             _ => Vec::new(),
         }
     }

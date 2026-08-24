@@ -14,6 +14,7 @@
 //! `:` opens the command palette. Mouse clicks focus panes / switch tabs.
 
 mod action;
+mod bindings;
 mod history;
 mod input;
 mod keymap;
@@ -212,6 +213,10 @@ fn handle_input(state: &mut State, layout: &view::RenderInfo, event: Event) {
         Event::Mouse(m) => match m.kind {
             MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
                 view::mouse_action(state, layout, m.column, m.row)
+            }
+            MouseEventKind::ScrollUp => view::mouse_wheel_action(state, layout, m.column, m.row, 1),
+            MouseEventKind::ScrollDown => {
+                view::mouse_wheel_action(state, layout, m.column, m.row, -1)
             }
             _ => None,
         },

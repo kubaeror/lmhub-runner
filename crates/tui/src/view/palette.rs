@@ -23,8 +23,11 @@ pub fn draw(f: &mut Frame, state: &State, modal: &Modal) {
             );
         }
         Modal::Palette { filter, cursor } => draw_palette(f, state, filter.as_str(), *cursor),
+        Modal::Help => draw_help(f, state),
         Modal::BulkConfirm => draw_bulk_confirm(f, state),
-        Modal::HistoryDetail(text) => draw_detail(f, text, " statistics (Esc closes) "),
+        Modal::HistoryDetail { text, scroll } => {
+            draw_detail(f, text, *scroll, " statistics (Esc closes, ↑/↓ scroll) ")
+        }
         Modal::RunDetail { run_id } => draw_run_detail(f, state, *run_id),
     }
 }
@@ -157,13 +160,49 @@ fn draw_bulk_confirm(f: &mut Frame, state: &State) {
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
-fn draw_detail(f: &mut Frame, text: &str, title: &str) {
+/// Keybinding help overlay: global bindings + the current screen's.
+fn draw_help(f: &mut Frame, state: &State) {
+    let area = centered_rect(f.area(), 70, 20);
+    let inner = modal_frame(f, area, " Keybindings (? closes) ".into());
+    let help_lines = crate::bindings::help_lines(state.screen);
+    let lines: Vec<Line> = help_lines
+        .iter()
+        .map(|l| {
+            if l.starts_with("──") {
+                Line::styled(
+                    l.as_str(),
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Line::raw(l.as_str())
+            }
+        })
+        .collect();
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Scrollable pretty-printed text modal (statistics detail).
+fn draw_detail(f: &mut Frame, text: &str, scroll: usize, title: &str) {
     let area = centered_rect(f.area(), 70, 16);
     let inner = modal_frame(f, area, title.into());
-    f.render_widget(
-        Paragraph::new(text.to_string()).wrap(Wrap { trim: false }),
-        inner,
-    );
+    let all_lines: Vec<&str> = text.lines().collect();
+    let max = all_lines.len().saturating_sub(1);
+    let start = scroll.min(max);
+    let end = (start + inner.height as usize).min(all_lines.len());
+    let lines: Vec<Line> = all_lines[start..end]
+        .iter()
+        .map(|l| Line::raw(*l))
+        .collect();
+    let bar = Rect {
+        x: area.x + area.width.saturating_sub(1),
+        y: area.y,
+        width: 1,
+        height: area.height,
+    };
+    f.render_widget(Paragraph::new(lines), inner);
+    render_scrollbar(f, Some(bar), all_lines.len(), start);
 }
 
 fn draw_run_detail(f: &mut Frame, state: &State, run_id: u64) {
