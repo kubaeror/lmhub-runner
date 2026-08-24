@@ -437,32 +437,40 @@ impl State {
         }
     }
 
-    /// The effective reasoning level for the selected model: the stored
-    /// choice, clamped to what the model actually offers (its first level
+    /// The effective reasoning level for the selected model: its pinned
+    /// per-model default when one is set, otherwise the user's last chosen
+    /// level — clamped to what the model actually offers (its first level
     /// when the choice is unsupported — never a hard fallback to off).
+    /// Mirrors [`Self::bulk_reasoning_for`] so single and bulk runs agree.
     pub fn selected_reasoning(&self) -> ReasoningLevel {
+        let level = self
+            .selected_model()
+            .and_then(|m| self.default_reasoning_for(&m.id))
+            .unwrap_or(self.setup.reasoning);
         let levels = self.visible_reasoning_levels();
-        if levels.contains(&self.setup.reasoning) {
-            self.setup.reasoning
+        if levels.contains(&level) {
+            level
         } else {
             levels.first().copied().unwrap_or(ReasoningLevel::Off)
         }
     }
 
-    /// Re-seat the reasoning selection for the current model: a pinned
-    /// default seats the selection on fresh visits; otherwise the user's
-    /// last chosen level is kept for display. The stored choice is never
-    /// lost here — only `reasoning_idx` moves.
+    /// Re-seat the reasoning display for the current model: a pinned
+    /// default seats `reasoning_idx` on fresh visits; otherwise the user's
+    /// last chosen level is kept for display. The stored choice
+    /// (`setup.reasoning`) is never modified here — it stays the model-
+    /// independent fallback for bulk runs — only `reasoning_idx` moves.
     pub fn snap_reasoning_to_default(&mut self) {
         let Some(model) = self.selected_model() else {
             return;
         };
         let levels = self.visible_reasoning_levels();
-        // A freshly selected model with a pinned default seats on it.
+        // A freshly selected model with a pinned default seats the display
+        // on it (the effective level comes from `selected_reasoning` and
+        // `bulk_reasoning_for`, never by clobbering the chosen level).
         if let Some(level) = self.prefs.model_defaults.get(&model.id).copied() {
             if let Some(idx) = levels.iter().position(|l| *l == level) {
                 self.setup.reasoning_idx = idx;
-                self.setup.reasoning = level;
                 return;
             }
         }

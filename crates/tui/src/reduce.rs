@@ -537,6 +537,60 @@ mod tests {
     }
 
     #[test]
+    fn bulk_navigation_keeps_chosen_level_across_pinned_default() {
+        let (mut state, _dir) = crate::testutil::test_state();
+        seed_catalog(
+            &mut state,
+            "openai",
+            &["gpt-4o", "gpt-4o-mini", "gpt-4o-turbo"],
+        );
+        state.setup.models = vec![
+            reasoning_model("gpt-4o"),
+            reasoning_model("gpt-4o-mini"),
+            reasoning_model("gpt-4o-turbo"),
+        ];
+        seed_task_prompts(&mut state, &["build"]);
+        // gpt-4o-mini carries a pinned default; navigating onto it must not
+        // clobber the chosen level used as the bulk fallback elsewhere.
+        state
+            .prefs
+            .model_defaults
+            .insert("gpt-4o-mini".into(), lmhub_core::ReasoningLevel::Low);
+        state.setup.bulk = std::collections::BTreeSet::from([
+            ("openai".into(), "gpt-4o".into()),
+            ("openai".into(), "gpt-4o-mini".into()),
+            ("openai".into(), "gpt-4o-turbo".into()),
+        ]);
+        state.setup.focus = crate::state::Pane::Models;
+        state.reduce(Action::CycleReasoning(2)); // chosen: high
+                                                 // Land on the pinned model and then off again (bulk navigation).
+        state.reduce(Action::MoveSelection(1));
+        state.reduce(Action::MoveSelection(-1));
+        assert_eq!(
+            state.setup.reasoning,
+            lmhub_core::ReasoningLevel::High,
+            "chosen level survives navigation over a pinned default"
+        );
+        state.reduce(Action::BulkStart);
+        state.reduce(Action::ConfirmBulkStart);
+        let by_model: std::collections::BTreeMap<String, String> = state
+            .runs
+            .runs
+            .iter()
+            .map(|r| (r.model_id.clone(), r.reasoning.clone()))
+            .collect();
+        assert_eq!(by_model["gpt-4o"], "high", "chosen level applies");
+        assert_eq!(
+            by_model["gpt-4o-mini"], "low",
+            "pinned default wins per model"
+        );
+        assert_eq!(
+            by_model["gpt-4o-turbo"], "high",
+            "chosen level survives for others"
+        );
+    }
+
+    #[test]
     fn map_cycle_default_wraps_through_supported_levels() {
         let (mut state, _dir) = crate::testutil::test_state();
         state.snapshot_all = Some(std::sync::Arc::new(lmhub_modelsdev::CatalogSnapshot {
