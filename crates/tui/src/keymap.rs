@@ -123,21 +123,14 @@ fn setup_keys(state: &State, key: KeyEvent) -> Option<Action> {
             _ => None,
         },
         Pane::Task => match key.code {
-            KeyCode::Up => Some(Action::TaskRecall(1)),
-            KeyCode::Down => Some(Action::TaskRecall(-1)),
-            // Enter edits (newline); Ctrl+Enter runs — chat-UI convention.
+            KeyCode::Up => Some(Action::CycleTaskPrompt(1)),
+            KeyCode::Down => Some(Action::CycleTaskPrompt(-1)),
+            KeyCode::Char('d') => Some(Action::SetDefaultTaskPrompt),
+            // Ctrl+Enter runs the selected task prompt — chat-UI convention.
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 Some(Action::StartRun)
             }
-            KeyCode::Enter => Some(Action::TaskNewline),
-            KeyCode::Left => Some(Action::TaskCursorMove(-1)),
-            KeyCode::Right => Some(Action::TaskCursorMove(1)),
-            KeyCode::Home => Some(Action::TaskCursorLineStart),
-            KeyCode::End => Some(Action::TaskCursorLineEnd),
-            KeyCode::Delete => Some(Action::TaskDelete),
-            KeyCode::Backspace => Some(Action::TaskBackspace),
             KeyCode::Char('x') => Some(Action::BulkStart),
-            KeyCode::Char(c) => Some(Action::TaskChar(c)),
             _ => None,
         },
     }
@@ -218,6 +211,7 @@ mod tests {
             lmhub_core::AppConfig::default(),
             dir.path().join("config.toml"),
             Vec::new(),
+            Vec::new(),
             dir.path().join("output"),
             tx,
         )
@@ -270,10 +264,18 @@ mod tests {
     fn task_pane_keys() {
         let mut s = state_with();
         s.setup.focus = Pane::Task;
-        // Plain Enter inserts a newline; Ctrl+Enter starts the run.
+        // Up/Down cycle the selected task prompt; Ctrl+Enter starts the run.
         assert!(matches!(
-            dispatch(&s, key(KeyCode::Enter)),
-            Some(Action::TaskNewline)
+            dispatch(&s, key(KeyCode::Up)),
+            Some(Action::CycleTaskPrompt(1))
+        ));
+        assert!(matches!(
+            dispatch(&s, key(KeyCode::Down)),
+            Some(Action::CycleTaskPrompt(-1))
+        ));
+        assert!(matches!(
+            dispatch(&s, key(KeyCode::Char('d'))),
+            Some(Action::SetDefaultTaskPrompt)
         ));
         assert!(matches!(
             dispatch(&s, KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)),
@@ -283,9 +285,7 @@ mod tests {
             dispatch(&s, key(KeyCode::Char('x'))),
             Some(Action::BulkStart)
         ));
-        assert!(matches!(
-            dispatch(&s, key(KeyCode::Char('a'))),
-            Some(Action::TaskChar('a'))
-        ));
+        // Free-text editing is gone: letters do nothing on the Task pane.
+        assert!(dispatch(&s, key(KeyCode::Char('a'))).is_none());
     }
 }

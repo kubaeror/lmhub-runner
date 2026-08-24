@@ -55,6 +55,7 @@ jobs:
           strip "$BIN" 2>/dev/null || true
           cp "$BIN" "$OUT/"
           cp prompts/*.md "$OUT/prompts/" 2>/dev/null || true
+          cp -r prompts/system-prompts prompts/task-prompts "$OUT/prompts/" 2>/dev/null || true
           cp providers/example.toml.example "$OUT/providers/" 2>/dev/null || true
           tar czf "$NAME.tar.gz" "$OUT"
           echo "asset=$NAME.tar.gz" >> "$GITHUB_OUTPUT"

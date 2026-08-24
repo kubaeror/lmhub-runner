@@ -4,7 +4,7 @@
 //! provider/model/reasoning/prompt selection, live runs and history.
 
 use anyhow::Context;
-use lmhub_core::{AppConfig, DEFAULT_SYSTEM_PROMPT};
+use lmhub_core::{AppConfig, DEFAULT_SYSTEM_PROMPT, DEFAULT_TASK_PROMPT};
 use lmhub_modelsdev::ModelsDevClient;
 use lmhub_tui::{PromptFile, TuiContext};
 use std::io::Write as _;
@@ -106,7 +106,7 @@ async fn run(
         eprintln!("lmhub: custom provider skipped: {err}");
     }
 
-    let prompts = discover_prompts(&[
+    let (prompts, task_prompts) = discover_prompt_lists(&[
         project_dir.join("prompts"),
         config_dir.join("prompts"),
         cache_dir.join("prompts"),
@@ -118,6 +118,7 @@ async fn run(
         config,
         config_path,
         prompts,
+        task_prompts,
         output_base,
         auth_store,
         sandbox_runtime,
@@ -215,37 +216,33 @@ impl std::io::Write for ScrubbingFileWriter {
 }
 
 /// Discover prompt files (`*.md`) across directories, later dirs deduped.
-/// Guarantees at least one usable prompt: writes `default.md` on first run.
-fn discover_prompts(dirs: &[PathBuf]) -> Vec<PromptFile> {
-    let mut seen = std::collections::BTreeSet::new();
-    let mut out = Vec::new();
+///
+/// Two independent lists, mirroring the TUI's two pickers:
+/// - **system prompts**: files at the root of each `prompts/` dir (backward
+///   compatible with the old layout) plus `prompts/system-prompts/`;
+/// - **task prompts**: files in `prompts/task-prompts/` — the user
+///   instruction sent as the first message, replacing the old free-text task.
+///
+/// Guarantees both lists are non-empty: writes a `default.md` on first run
+/// (system) and a `task-prompts/default.md` (task), with virtual built-in
+/// entries as the absolute fallback.
+fn discover_prompt_lists(dirs: &[PathBuf]) -> (Vec<PromptFile>, Vec<PromptFile>) {
+    const SYSTEM_SUBDIR: &str = "system-prompts";
+    const TASK_SUBDIR: &str = "task-prompts";
+    let mut seen_system = std::collections::BTreeSet::new();
+    let mut seen_task = std::collections::BTreeSet::new();
+    let mut system = Vec::new();
+    let mut task = Vec::new();
 
     for dir in dirs {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            continue;
-        };
-        let mut files: Vec<PathBuf> = entries
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.extension().map(|x| x == "md").unwrap_or(false))
-            .collect();
-        files.sort();
-        for path in files {
-            let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            if seen.insert(name.to_string()) {
-                out.push(PromptFile {
-                    name: name.to_string(),
-                    path: path.clone(),
-                });
-            }
-        }
+        scan_prompt_dir(dir, None, &mut system, &mut seen_system);
+        scan_prompt_dir(dir, Some(SYSTEM_SUBDIR), &mut system, &mut seen_system);
+        scan_prompt_dir(dir, Some(TASK_SUBDIR), &mut task, &mut seen_task);
     }
 
-    if out.is_empty() {
-        // First-run convenience: materialize the built-in prompt as a file
-        // users can edit or duplicate.
+    if system.is_empty() {
+        // First-run convenience: materialize the built-in system prompt as a
+        // file users can edit or duplicate.
         if let Some(first) = dirs.first() {
             if std::fs::create_dir_all(first).is_ok() {
                 let target = first.join("default.md");
@@ -256,17 +253,118 @@ fn discover_prompts(dirs: &[PathBuf]) -> Vec<PromptFile> {
                 {
                     let _ = f.write_all(DEFAULT_SYSTEM_PROMPT.as_bytes());
                 }
-                return vec![PromptFile {
-                    name: "default".into(),
-                    path: target,
-                }];
+                if target.exists() {
+                    system.push(PromptFile {
+                        name: "default".into(),
+                        path: target,
+                    });
+                }
             }
         }
-        // Absolute fallback: virtual entry backed by the embedded constant.
-        out.push(PromptFile {
-            name: "built-in".into(),
-            path: PathBuf::new(),
-        });
+        if system.is_empty() {
+            // Absolute fallback: virtual entry backed by the embedded constant.
+            system.push(PromptFile {
+                name: "built-in".into(),
+                path: PathBuf::new(),
+            });
+        }
     }
-    out
+
+    if task.is_empty() {
+        if let Some(first) = dirs.first() {
+            let target = first.join(TASK_SUBDIR).join("default.md");
+            if std::fs::create_dir_all(target.parent().expect("subdir has parent")).is_ok() {
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .open(&target)
+                {
+                    let _ = f.write_all(DEFAULT_TASK_PROMPT.as_bytes());
+                }
+                if target.exists() {
+                    task.push(PromptFile {
+                        name: "default".into(),
+                        path: target,
+                    });
+                }
+            }
+        }
+        if task.is_empty() {
+            task.push(PromptFile {
+                name: "built-in".into(),
+                path: PathBuf::new(),
+            });
+        }
+    }
+    (system, task)
+}
+
+/// Scan one prompt directory (root or a `system-prompts`/`task-prompts`
+/// subdir), appending new `*.md` files to `list` (deduped by stem name).
+fn scan_prompt_dir(
+    dir: &Path,
+    subdir: Option<&str>,
+    list: &mut Vec<PromptFile>,
+    seen: &mut std::collections::BTreeSet<String>,
+) {
+    let scan_dir = match subdir {
+        Some(s) => dir.join(s),
+        None => dir.to_path_buf(),
+    };
+    let Ok(entries) = std::fs::read_dir(&scan_dir) else {
+        return;
+    };
+    let mut files: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().map(|x| x == "md").unwrap_or(false))
+        .collect();
+    files.sort();
+    for path in files {
+        let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if seen.insert(name.to_string()) {
+            list.push(PromptFile {
+                name: name.to_string(),
+                path: path.clone(),
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prompt_discovery_splits_root_system_and_task_subdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let prompts = dir.path().join("prompts");
+        std::fs::create_dir_all(prompts.join("system-prompts")).unwrap();
+        std::fs::create_dir_all(prompts.join("task-prompts")).unwrap();
+        std::fs::write(prompts.join("legacy.md"), "sys").unwrap();
+        std::fs::write(prompts.join("system-prompts").join("deep.md"), "sys").unwrap();
+        std::fs::write(prompts.join("task-prompts").join("build.md"), "task").unwrap();
+        std::fs::write(prompts.join("task-prompts").join("refactor.md"), "task").unwrap();
+
+        let (system, task) = discover_prompt_lists(&[prompts]);
+        let names: Vec<&str> = system.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["legacy", "deep"], "root files are system prompts");
+        let names: Vec<&str> = task.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["build", "refactor"]);
+    }
+
+    #[test]
+    fn prompt_discovery_materializes_defaults_on_first_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let prompts = dir.path().join("prompts");
+        let (system, task) = discover_prompt_lists(std::slice::from_ref(&prompts));
+        assert_eq!(system.len(), 1);
+        assert_eq!(task.len(), 1);
+        assert_eq!(system[0].name, "default");
+        assert_eq!(task[0].name, "default");
+        assert!(prompts.join("default.md").exists());
+        assert!(prompts.join("task-prompts").join("default.md").exists());
+    }
 }

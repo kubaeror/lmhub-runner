@@ -113,6 +113,7 @@ impl State {
                 Pane::Providers => self.move_provider(delta),
                 Pane::Models => self.move_model(delta),
                 Pane::Prompts => self.move_prompt(delta),
+                Pane::Task => self.move_task_prompt(delta),
                 _ => Vec::new(),
             },
             Action::SearchProviders(text) => {
@@ -158,64 +159,14 @@ impl State {
                 Vec::new()
             }
             Action::SetDefaultPrompt => self.set_default_prompt(),
-            Action::TaskChar(c) => {
-                if c.is_control() {
-                    return Vec::new();
-                }
-                let text = &mut self.setup.task_input;
-                if text.is_char_boundary(self.setup.task_cursor) {
-                    text.insert(self.setup.task_cursor, c);
-                }
-                self.setup.task_cursor += c.len_utf8();
-                self.setup.task_recall_idx = None;
+            Action::CycleTaskPrompt(delta) => {
+                let len = self.task_prompts.len().max(1);
+                self.setup.task_prompt_idx =
+                    (self.setup.task_prompt_idx as i32 + delta).rem_euclid(len as i32) as usize;
                 Vec::new()
             }
-            Action::TaskBackspace => {
-                let prev = prev_char_boundary(&self.setup.task_input, self.setup.task_cursor);
-                self.setup.task_input.drain(prev..self.setup.task_cursor);
-                self.setup.task_cursor = prev;
-                self.setup.task_recall_idx = None;
-                Vec::new()
-            }
-            Action::TaskNewline => {
-                self.setup.task_input.insert(self.setup.task_cursor, '\n');
-                self.setup.task_cursor += 1;
-                self.setup.task_recall_idx = None;
-                Vec::new()
-            }
-            Action::TaskCursorMove(delta) => {
-                self.setup.task_cursor = if delta < 0 {
-                    prev_char_boundary(&self.setup.task_input, self.setup.task_cursor)
-                } else {
-                    next_char_boundary(&self.setup.task_input, self.setup.task_cursor)
-                };
-                self.setup.task_recall_idx = None;
-                Vec::new()
-            }
-            Action::TaskCursorLineStart => {
-                let line_start = self.setup.task_input[..self.setup.task_cursor]
-                    .rfind('\n')
-                    .map_or(0, |i| i + 1);
-                self.setup.task_cursor = line_start;
-                Vec::new()
-            }
-            Action::TaskCursorLineEnd => {
-                let line_end = self.setup.task_input[self.setup.task_cursor..]
-                    .find('\n')
-                    .map_or(self.setup.task_input.len(), |i| self.setup.task_cursor + i);
-                self.setup.task_cursor = line_end;
-                Vec::new()
-            }
-            Action::TaskDelete => {
-                let next = next_char_boundary(&self.setup.task_input, self.setup.task_cursor);
-                if next > self.setup.task_cursor {
-                    self.setup.task_input.drain(self.setup.task_cursor..next);
-                }
-                self.setup.task_recall_idx = None;
-                Vec::new()
-            }
+            Action::SetDefaultTaskPrompt => self.set_default_task_prompt(),
             Action::Paste(text) => self.paste_text(text),
-            Action::TaskRecall(delta) => self.task_recall(delta),
             Action::StartRun => self.start_run(),
             Action::BulkStart => self.bulk_start(),
             Action::ConfirmBulkStart => self.confirm_bulk_start(),
@@ -436,8 +387,8 @@ impl State {
         if let Some(p) = self.prompts.get(self.setup.prompt_idx) {
             self.prefs.last_prompt = Some(p.name.clone());
         }
-        if !self.setup.task_input.trim().is_empty() {
-            self.prefs.last_task = Some(self.setup.task_input.clone());
+        if let Some(p) = self.task_prompts.get(self.setup.task_prompt_idx) {
+            self.prefs.last_task_prompt = Some(p.name.clone());
         }
     }
 
@@ -714,23 +665,27 @@ impl State {
         Vec::new()
     }
 
-    fn task_recall(&mut self, delta: i32) -> Vec<Effect> {
-        let hist = &self.prefs.task_history;
-        if hist.is_empty() {
+    fn move_task_prompt(&mut self, delta: i32) -> Vec<Effect> {
+        let len = self.task_prompts.len();
+        if len == 0 {
             return Vec::new();
         }
-        let len = hist.len();
-        // History is ordered oldest → newest; Up (delta > 0) walks older.
-        let pos = match self.setup.task_recall_idx {
-            Some(p) if delta > 0 => p.saturating_sub(1),
-            Some(p) => (p + 1).min(len - 1),
-            None if delta > 0 => len - 1,
-            None => 0,
-        };
-        self.setup.task_recall_idx = Some(pos);
-        self.setup.task_input = hist[pos].clone();
-        self.setup.task_cursor = self.setup.task_input.len();
+        self.setup.task_prompt_idx =
+            ((self.setup.task_prompt_idx as i32 + delta).max(0) as usize).min(len - 1);
         Vec::new()
+    }
+
+    fn set_default_task_prompt(&mut self) -> Vec<Effect> {
+        let Some(p) = self.task_prompts.get(self.setup.task_prompt_idx) else {
+            return Vec::new();
+        };
+        self.config.default_task_prompt = Some(p.name.clone());
+        match self.config.save(&self.config_path) {
+            Ok(()) => self.push_notice(format!("default task prompt → {}", p.name)),
+            Err(e) => self.push_notice(format!("✖ could not save config: {e}")),
+        }
+        self.save_prefs();
+        vec![Effect::SavePrefs]
     }
 
     fn set_default_prompt(&mut self) -> Vec<Effect> {
@@ -806,14 +761,16 @@ impl State {
                 return Vec::new();
             }
         };
-        if self.setup.task_input.trim().is_empty() {
-            self.push_notice("task is empty — type what to build first");
-            return Vec::new();
-        }
+        let task = match self.selected_task_prompt() {
+            Some(t) => t,
+            None => {
+                self.push_notice("no task prompt available — add one to prompts/task-prompts/");
+                return Vec::new();
+            }
+        };
         let system_prompt = self.system_prompt_for(self.setup.prompt_idx);
         let pricing = self.selected_pricing();
         let reasoning = self.selected_reasoning();
-        let task = self.setup.task_input.trim().to_string();
         self.launch_session(provider, model, reasoning, system_prompt, task, pricing)
     }
 
@@ -836,8 +793,8 @@ impl State {
             ));
             return Vec::new();
         }
-        if self.setup.task_input.trim().is_empty() {
-            self.push_notice("task is empty — type what to build first");
+        if self.selected_task_prompt().is_none() {
+            self.push_notice("no task prompt available — add one to prompts/task-prompts/");
             return Vec::new();
         }
         self.modal = Some(Modal::BulkConfirm);
@@ -851,9 +808,12 @@ impl State {
             self.push_notice("no launchable selections");
             return Vec::new();
         }
+        let Some(task) = self.selected_task_prompt() else {
+            self.push_notice("no task prompt available — add one to prompts/task-prompts/");
+            return Vec::new();
+        };
         let system_prompt = self.system_prompt_for(self.setup.prompt_idx);
         let fallback = self.selected_reasoning();
-        let task = self.setup.task_input.trim().to_string();
         let mut effects = Vec::new();
         for spec in specs {
             let provider = match self.registry.get(&spec.provider_id) {
@@ -877,7 +837,6 @@ impl State {
         }
         self.setup.bulk.clear();
         self.setup.multi_select = false;
-        self.prefs.remember_task(task);
         self.save_prefs();
         effects.push(Effect::SavePrefs);
         effects
@@ -934,7 +893,6 @@ impl State {
         self.runs.runs.push(session);
         self.runs.selected = self.runs.runs.len() - 1;
         self.screen = Screen::Run;
-        self.prefs.remember_task(task);
         self.save_prefs();
         let mut effects = vec![Effect::SavePrefs];
         if slot_free {
@@ -955,6 +913,15 @@ impl State {
         }
     }
 
+    /// Resolve the selected task prompt to its text (the first user message).
+    /// Falls back to the built-in task prompt when the list is empty.
+    fn selected_task_prompt(&self) -> Option<String> {
+        match self.task_prompts.get(self.setup.task_prompt_idx) {
+            Some(p) => Some(lmhub_core::load_task_prompt(&p.path)),
+            None => Some(lmhub_core::DEFAULT_TASK_PROMPT.to_string()),
+        }
+    }
+
     // ---- palette ----------------------------------------------------------
 
     /// Currently available palette commands (name + enabled + cmd).
@@ -963,7 +930,7 @@ impl State {
             (
                 PaletteCmd::RunSingle,
                 PaletteCmd::RunSingle.label().into(),
-                self.selected_model().is_some() && !self.setup.task_input.trim().is_empty(),
+                self.selected_model().is_some() && !self.task_prompts.is_empty(),
             ),
             (
                 PaletteCmd::BulkRun,
@@ -1054,32 +1021,11 @@ impl State {
     }
 }
 
-/// Previous UTF-8 char boundary strictly before `idx` (clamped to 0).
-/// `idx` itself is expected to be a boundary already.
-fn prev_char_boundary(s: &str, idx: usize) -> usize {
-    let mut i = idx.min(s.len()).saturating_sub(1);
-    while i > 0 && !s.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
-}
-
-/// Clamp `idx` to the nearest UTF-8 char boundary at or before it.
-/// Shared with the view layer so drawing can never panic on a stale cursor.
-pub(crate) fn floor_char_boundary(s: &str, idx: usize) -> usize {
-    let mut i = idx.min(s.len());
-    while i > 0 && !s.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
-}
-
 impl State {
     /// Paste (bracketed-paste text) into the focused input field.
     ///
-    /// Line endings are normalized to `\n`. The Task pane accepts multi-line
-    /// text at the cursor; single-line fields (modals, search filters) get
-    /// every control character stripped.
+    /// Line endings are normalized to `\n`. Single-line fields (modals,
+    /// search filters) get every control character stripped.
     fn paste_text(&mut self, raw: String) -> Vec<Effect> {
         let text = raw.replace("\r\n", "\n").replace('\r', "\n");
         if let Some(Modal::EnterKey { input, .. }) = &mut self.modal {
@@ -1091,14 +1037,6 @@ impl State {
             return Vec::new();
         }
         match self.screen {
-            Screen::Setup if self.setup.focus == Pane::Task => {
-                self.setup.task_cursor =
-                    floor_char_boundary(&self.setup.task_input, self.setup.task_cursor);
-                let t = &mut self.setup.task_input;
-                t.insert_str(self.setup.task_cursor, &text);
-                self.setup.task_cursor += text.len();
-                self.setup.task_recall_idx = None;
-            }
             Screen::Setup if self.setup.focus == Pane::Providers => {
                 self.setup
                     .provider_filter
@@ -1113,15 +1051,6 @@ impl State {
         }
         Vec::new()
     }
-}
-
-/// Next UTF-8 char boundary strictly after `idx` (clamped to `s.len()`).
-fn next_char_boundary(s: &str, idx: usize) -> usize {
-    let mut i = idx.saturating_add(1).min(s.len());
-    while i < s.len() && !s.is_char_boundary(i) {
-        i += 1;
-    }
-    i
 }
 
 #[cfg(test)]
@@ -1149,6 +1078,7 @@ mod tests {
             lmhub_core::AppConfig::default(),
             dir.path().join("config.toml"),
             Vec::new(),
+            Vec::new(),
             dir.path().join("output"),
             tx,
         );
@@ -1174,6 +1104,26 @@ mod tests {
             provider_id.to_string(),
             crate::state::CachedCatalog::from_catalog(&catalog, None),
         );
+    }
+
+    /// Seed the task-prompt list with tempdir-backed files named `name`.
+    fn seed_task_prompts(state: &mut State, names: &[&str]) {
+        let dir = std::env::temp_dir().join(format!("lmhub-taskprompt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        state.task_prompts = names
+            .iter()
+            .map(|n| {
+                let path = dir.join(format!("{n}.md"));
+                let content = format!("{n} the codebase");
+                if std::fs::metadata(&path).is_err() {
+                    std::fs::write(&path, &content).unwrap();
+                }
+                crate::PromptFile {
+                    name: n.to_string(),
+                    path,
+                }
+            })
+            .collect();
     }
 
     #[test]
@@ -1220,83 +1170,67 @@ mod tests {
     }
 
     #[test]
-    fn task_recall_cycles_history() {
+    fn task_prompt_cycles_list() {
         let (mut state, _dir) = test_state();
-        state.prefs.task_history = vec!["old".into(), "newer".into()];
-        state.reduce(Action::TaskRecall(1));
-        assert_eq!(state.setup.task_input, "newer");
-        state.reduce(Action::TaskRecall(1));
-        assert_eq!(state.setup.task_input, "old");
-        // Typing resets recall position.
-        state.reduce(Action::TaskChar('!'));
-        assert!(state.setup.task_recall_idx.is_none());
+        seed_task_prompts(&mut state, &["build", "refactor"]);
+        state.reduce(Action::CycleTaskPrompt(1));
+        assert_eq!(state.setup.task_prompt_idx, 1);
+        state.reduce(Action::CycleTaskPrompt(1));
+        assert_eq!(state.setup.task_prompt_idx, 0);
+        state.reduce(Action::CycleTaskPrompt(-1));
+        assert_eq!(state.setup.task_prompt_idx, 1);
     }
 
     #[test]
-    fn task_editor_supports_multiline_and_cursor() {
+    fn start_run_resolves_selected_task_prompt() {
         let (mut state, _dir) = test_state();
-        // Enter inserts a newline at the cursor, not just at the end.
-        for c in ['a', 'b'] {
-            state.reduce(Action::TaskChar(c));
-        }
-        state.reduce(Action::TaskCursorLineStart);
-        state.reduce(Action::TaskNewline);
-        assert_eq!(state.setup.task_input, "\nab");
-        // Typing at the cursor inserts mid-buffer (cursor sits after '\n').
-        state.reduce(Action::TaskCursorMove(1));
-        state.reduce(Action::TaskChar('X'));
-        assert_eq!(state.setup.task_input, "\naXb");
-        // Backspace removes the char before the cursor.
-        state.reduce(Action::TaskBackspace);
-        assert_eq!(state.setup.task_input, "\nab");
-        // Home/End jump to line start/end.
-        state.reduce(Action::TaskCursorLineStart);
-        state.reduce(Action::TaskCursorLineEnd);
-        assert_eq!(state.setup.task_cursor, state.setup.task_input.len());
-        // Delete removes the char at the cursor.
-        state.reduce(Action::TaskCursorLineStart);
-        state.reduce(Action::TaskDelete); // removes 'a' of line "ab"
-        assert_eq!(state.setup.task_input, "\nb");
-        state.reduce(Action::TaskDelete); // removes 'b'
-        assert_eq!(state.setup.task_input, "\n");
-        state.reduce(Action::TaskCursorMove(-1)); // step before the newline
-        state.reduce(Action::TaskDelete); // removes the newline
-        assert_eq!(state.setup.task_input, "");
-        // Cursor never lands mid-UTF-8: moving left/right walks chars.
-        state.reduce(Action::TaskChar('é'));
-        state.reduce(Action::TaskCursorMove(-1));
-        assert!(state
-            .setup
-            .task_input
-            .is_char_boundary(state.setup.task_cursor));
-        // History recall drops the cursor at the end of the recalled text.
-        state.prefs.task_history = vec!["multi\nline task".into()];
-        state.reduce(Action::TaskRecall(1));
-        assert_eq!(state.setup.task_cursor, state.setup.task_input.len());
+        seed_task_prompts(&mut state, &["build", "refactor"]);
+        state.setup.models = vec![model("gpt-4o")];
+        state.setup.task_prompt_idx = 1;
+        let effects = state.reduce(Action::StartRun);
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::LaunchRun { .. })),
+            "launch effect expected"
+        );
+        let run = state.runs.runs.last().unwrap();
+        assert_eq!(run.model_id, "gpt-4o");
+        assert!(run.task.contains("refactor"));
     }
 
     #[test]
-    fn paste_multiline_text_into_task() {
+    fn start_run_without_task_prompts_uses_builtin() {
         let (mut state, _dir) = test_state();
-        state.setup.focus = Pane::Task;
-        // CRLF and lone CR both normalize to LF.
-        let pasted = "step 1\r\nstep 2\rstep 3\n";
-        state.reduce(Action::Paste(pasted.into()));
-        assert_eq!(state.setup.task_input, "step 1\nstep 2\nstep 3\n");
-        assert_eq!(state.setup.task_cursor, state.setup.task_input.len());
-        // Pasting mid-buffer inserts at the cursor (here: the trailing
-        // empty line after the final newline).
-        state.reduce(Action::TaskCursorLineStart);
-        state.reduce(Action::Paste("head\n".into()));
-        assert_eq!(state.setup.task_input, "step 1\nstep 2\nstep 3\nhead\n");
-        // Cursor stays on a char boundary with multi-byte content around it.
-        state.reduce(Action::TaskCursorLineStart); // start of the "head" line
-        state.reduce(Action::TaskChar('é'));
-        state.reduce(Action::Paste("+".into()));
-        assert!(state
-            .setup
-            .task_input
-            .is_char_boundary(state.setup.task_cursor));
+        state.setup.models = vec![model("gpt-4o")];
+        let effects = state.reduce(Action::StartRun);
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::LaunchRun { .. })),
+            "launch effect expected"
+        );
+        assert_eq!(
+            state.runs.runs.last().unwrap().task,
+            lmhub_core::DEFAULT_TASK_PROMPT
+        );
+    }
+
+    #[test]
+    fn bulk_uses_selected_task_prompt() {
+        let (mut state, _dir) = test_state();
+        seed_task_prompts(&mut state, &["build", "refactor"]);
+        seed_catalog(&mut state, "openai", &["gpt-4o", "gpt-4o-mini"]);
+        state.setup.models = vec![model("gpt-4o"), model("gpt-4o-mini")];
+        state.setup.bulk = std::collections::BTreeSet::from([
+            ("openai".into(), "gpt-4o".into()),
+            ("openai".into(), "gpt-4o-mini".into()),
+        ]);
+        state.setup.task_prompt_idx = 1;
+        state.reduce(Action::BulkStart);
+        state.reduce(Action::ConfirmBulkStart);
+        assert_eq!(state.runs.runs.len(), 2);
+        assert!(state.runs.runs.iter().all(|r| r.task.contains("refactor")));
     }
 
     #[test]
@@ -1323,44 +1257,6 @@ mod tests {
         ));
     }
 
-    /// Simulate the pre-bracketed-paste path: a paste arriving as a burst of
-    /// key events must never corrupt the task buffer or the cursor.
-    #[test]
-    fn paste_as_key_events_keeps_invariants() {
-        let (mut state, _dir) = test_state();
-        state.setup.focus = Pane::Task;
-        let pasted = "build a\nmulti-line\nprompt\n";
-        for ch in pasted.chars() {
-            let key = if ch == '\n' {
-                crossterm::event::KeyCode::Enter
-            } else {
-                crossterm::event::KeyCode::Char(ch)
-            };
-            let action = crate::keymap::dispatch(
-                &state,
-                crossterm::event::KeyEvent::new(key, crossterm::event::KeyModifiers::NONE),
-            );
-            if let Some(a) = action {
-                state.reduce(a);
-            }
-            assert!(
-                state.setup.task_cursor <= state.setup.task_input.len(),
-                "cursor out of range after {ch:?}"
-            );
-            assert!(
-                state
-                    .setup
-                    .task_input
-                    .is_char_boundary(state.setup.task_cursor),
-                "cursor mid-char after {ch:?}"
-            );
-        }
-        assert_eq!(
-            state.setup.task_input, "build a\nmulti-line\nprompt\n",
-            "every pasted line survived"
-        );
-    }
-
     #[test]
     fn bulk_toggle_spans_providers_and_clears() {
         let (mut state, _dir) = test_state();
@@ -1385,7 +1281,7 @@ mod tests {
         state.prefs.max_concurrent_runs = 2;
         seed_catalog(&mut state, "openai", &["gpt-4o", "gpt-4o-mini", "gpt-4.1"]);
         state.setup.models = vec![model("gpt-4o"), model("gpt-4o-mini"), model("gpt-4.1")];
-        state.setup.task_input = "build a thing".into();
+        seed_task_prompts(&mut state, &["build"]);
         state.setup.bulk = std::collections::BTreeSet::from([
             ("openai".into(), "gpt-4o".into()),
             ("openai".into(), "gpt-4o-mini".into()),
@@ -1555,7 +1451,7 @@ mod tests {
         let (mut state, _dir) = test_state();
         seed_catalog(&mut state, "openai", &["gpt-4o", "gpt-4o-mini"]);
         state.setup.models = vec![model("gpt-4o"), model("gpt-4o-mini")];
-        state.setup.task_input = "build a thing".into();
+        seed_task_prompts(&mut state, &["build"]);
         state
             .prefs
             .model_defaults

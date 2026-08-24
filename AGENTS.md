@@ -41,7 +41,7 @@ belongs to the TUI). `LMHUB_CONFIG_DIR`/`LMHUB_CACHE_DIR`/`LMHUB_OUTPUT_DIR`/
 | `xtask` | `gen-providers` snapshot regeneration |
 | `src/main.rs` | wiring: auth store → redaction init → config → registry → TUI |
 | `providers/*.toml` | custom providers (override bundled by `id`), see `example.toml.example` |
-| `prompts/*.md` | public system prompts |
+| `prompts/*.md` | public system prompts (root + `system-prompts/`); task prompts live in `prompts/task-prompts/` |
 
 ## Design invariants (do not break these)
 

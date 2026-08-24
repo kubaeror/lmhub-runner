@@ -8,6 +8,8 @@ use std::path::Path;
 pub struct AppConfig {
     /// Prompt filename (without extension) preselected in the TUI.
     pub default_prompt: Option<String>,
+    /// Task prompt filename (without extension) preselected in the TUI.
+    pub default_task_prompt: Option<String>,
     /// Hard wall-clock deadline for a whole run.
     pub run_timeout_secs: u64,
     /// Maximum agent turns (LLM requests) per run.
@@ -39,6 +41,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             default_prompt: None,
+            default_task_prompt: None,
             run_timeout_secs: 900,
             max_turns: 30,
             command_timeout_secs: 90,

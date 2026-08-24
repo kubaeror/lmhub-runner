@@ -6,7 +6,8 @@
 //!
 //! Screens:
 //! - **Setup** — searchable/grouped provider list, model picker with
-//!   multi-select (bulk start across providers), reasoning, prompts, task;
+//!   multi-select (bulk start across providers), reasoning, system + task
+//!   prompt pickers;
 //! - **Run** — multiple concurrent sessions, structured transcript, stats;
 //! - **History** — previous runs' `statistics.json` (pretty-printed detail).
 //!
@@ -78,6 +79,7 @@ pub struct TuiContext {
     pub config: AppConfig,
     pub config_path: PathBuf,
     pub prompts: Vec<PromptFile>,
+    pub task_prompts: Vec<PromptFile>,
     pub output_base: PathBuf,
     pub auth_store: Arc<std::sync::Mutex<lmhub_core::AuthStore>>,
     pub sandbox_runtime: lmhub_sandbox::SandboxRuntime,
@@ -124,6 +126,7 @@ pub async fn run_tui(ctx: TuiContext) -> anyhow::Result<()> {
         ctx.config,
         ctx.config_path,
         ctx.prompts,
+        ctx.task_prompts,
         ctx.output_base,
         ui_tx,
     );

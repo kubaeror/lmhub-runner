@@ -86,7 +86,7 @@ pub fn status_line(state: &State) -> String {
 pub fn hints(state: &State) -> &'static str {
     match state.screen {
         crate::action::Screen::Setup => {
-            "type=search providers  ↑/↓ select  Enter newline  Ctrl-Enter run  ←/→ pane  m multi  Space bulk  F favorite  x bulk-run  F5 models  d default  : palette  q quit"
+            "type=search providers  ↑/↓ select  Ctrl-Enter run  ←/→ pane  m multi  Space bulk  F favorite  x bulk-run  F5 models  d set default  : palette  q quit"
         }
         crate::action::Screen::Run => {
             "[/] session  ↑/↓ scroll  c cancel  C all  R rerun  v raw feed  Enter detail  : palette  q quit"
