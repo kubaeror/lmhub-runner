@@ -1,5 +1,5 @@
 //! Setup screen: providers (searchable/grouped) · models (bulk-selectable)
-//! · details/reasoning/prompts · task editor.
+//! · details/reasoning · system + task prompt pickers.
 
 use crate::state::{Pane, State};
 use crate::view::shared::*;
@@ -12,13 +12,6 @@ use ratatui::{
 };
 
 pub fn draw(f: &mut Frame, state: &mut State, area: ratatui::layout::Rect) {
-    // Task gets a guaranteed minimum; the panes share the rest.
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(12), Constraint::Length(6)])
-        .split(area);
-    let top = chunks[0];
-
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -26,13 +19,14 @@ pub fn draw(f: &mut Frame, state: &mut State, area: ratatui::layout::Rect) {
             Constraint::Percentage(36),
             Constraint::Percentage(32),
         ])
-        .split(top);
+        .split(area);
 
     let right = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(4),
             Constraint::Length(3),
+            Constraint::Length(7),
             Constraint::Length(7),
         ])
         .split(cols[2]);
@@ -52,8 +46,7 @@ pub fn draw(f: &mut Frame, state: &mut State, area: ratatui::layout::Rect) {
     draw_details(f, state, right[0]);
     draw_reasoning(f, state, right[1]);
     draw_prompts(f, state, right[2]);
-
-    draw_task(f, state, chunks[1]);
+    draw_task_prompts(f, state, right[3]);
 }
 
 fn draw_providers(f: &mut Frame, state: &State, area: ratatui::layout::Rect) {
@@ -400,67 +393,45 @@ fn draw_prompts(f: &mut Frame, state: &State, area: ratatui::layout::Rect) {
     f.render_stateful_widget(list, area, &mut st);
 }
 
-fn draw_task(f: &mut Frame, state: &State, area: ratatui::layout::Rect) {
+fn draw_task_prompts(f: &mut Frame, state: &State, area: ratatui::layout::Rect) {
+    let items: Vec<ListItem> = state
+        .task_prompts
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let default_mark = state
+                .config
+                .default_task_prompt
+                .as_ref()
+                .map(|d| d == &p.name)
+                .unwrap_or(false);
+            ListItem::new(format!(
+                "{}{}{}",
+                if i == state.setup.task_prompt_idx {
+                    "▶ "
+                } else {
+                    "  "
+                },
+                p.name,
+                if default_mark { "  ★default" } else { "" }
+            ))
+        })
+        .collect();
     let bulk_n = state.setup.bulk.len();
     let title = if bulk_n > 0 {
-        format!(" Task (Ctrl-Enter = RUN · x = bulk {bulk_n}) ")
+        format!(" Task prompts (Ctrl-Enter = RUN · x = bulk {bulk_n}) ")
     } else {
-        " Task (Ctrl-Enter = RUN) ".to_string()
+        " Task prompts (Ctrl-Enter = RUN · d=set default) ".to_string()
     };
-    let block = bordered_block(title, focused_style(state.setup.focus, Pane::Task));
-    let inner = ratatui::layout::Rect {
-        x: area.x + 1,
-        y: area.y + 1,
-        width: area.width.saturating_sub(2),
-        height: area.height.saturating_sub(2),
-    };
-    if inner.height == 0 || inner.width == 0 {
-        f.render_widget(block, area);
-        return;
-    }
-    let text = &state.setup.task_input;
-    // Never panic on a stale/odd cursor: floor it to a char boundary and
-    // clamp it into range before slicing (defense in depth — reduce keeps
-    // the invariant, draw must survive violations).
-    let cursor = crate::reduce::floor_char_boundary(text, state.setup.task_cursor.min(text.len()));
-    let focused = state.setup.focus == Pane::Task;
-    // Cursor position (line, char column) derived from the prefix.
-    let prefix = &text[..cursor];
-    let cursor_line = prefix.matches('\n').count();
-    let cursor_col = prefix.chars().rev().take_while(|&c| c != '\n').count();
-    // Scroll vertically so the cursor line stays visible.
-    let scroll = cursor_line.saturating_sub(inner.height as usize - 1);
-    let max_col = inner.width.saturating_sub(1) as usize;
-    let mut rows = Vec::new();
-    for (i, line) in text
-        .split('\n')
-        .enumerate()
-        .skip(scroll)
-        .take(inner.height as usize)
-    {
-        let (shown_col, offset) = if i == cursor_line {
-            // Scroll horizontally so the cursor column stays visible.
-            let offset = cursor_col.saturating_sub(max_col);
-            (cursor_col - offset, offset)
-        } else {
-            (0, 0)
-        };
-        let shown: String = line.chars().skip(offset).collect();
-        let mut spans = Vec::new();
-        if focused && i == cursor_line {
-            let before: String = shown.chars().take(shown_col).collect();
-            let after: String = shown.chars().skip(shown_col).collect();
-            spans.push(Span::raw(before));
-            spans.push(Span::styled(
-                "▏",
-                focused_style(state.setup.focus, Pane::Task),
-            ));
-            spans.push(Span::raw(after));
-        } else {
-            spans.push(Span::raw(shown));
-        }
-        rows.push(Line::from(spans));
-    }
-    f.render_widget(Paragraph::new(rows), inner);
-    f.render_widget(block, area);
+    let list = List::new(items).block(bordered_block(
+        title,
+        focused_style(state.setup.focus, Pane::Task),
+    ));
+    let mut st = ListState::default().with_selected(Some(
+        state
+            .setup
+            .task_prompt_idx
+            .min(state.task_prompts.len().saturating_sub(1)),
+    ));
+    f.render_stateful_widget(list, area, &mut st);
 }

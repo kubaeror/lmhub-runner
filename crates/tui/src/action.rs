@@ -37,20 +37,13 @@ pub enum Action {
     CycleReasoning(i32),
     CyclePrompt(i32),
     SetDefaultPrompt,
-    TaskChar(char),
-    TaskBackspace,
-    /// `Enter` on Task: insert a newline at the cursor.
-    TaskNewline,
-    /// `←`/`→` on Task: move the cursor by one character.
-    TaskCursorMove(i32),
-    /// `Home`/`End` on Task: jump to the start/end of the current line.
-    TaskCursorLineStart,
-    TaskCursorLineEnd,
-    /// `Delete` on Task: delete the character at the cursor.
-    TaskDelete,
+    /// `↑`/`↓` on the Task pane: cycle the selected task prompt.
+    CycleTaskPrompt(i32),
+    /// `d` on the Task pane: pin the selected task prompt as the config
+    /// default.
+    SetDefaultTaskPrompt,
     /// Bracketed-paste text: inserted into the focused input field.
     Paste(String),
-    TaskRecall(i32),
     /// `Ctrl+Enter` on Task: run the current single selection.
     StartRun,
     /// `x` on Task: bulk-launch every selected (provider, model) pair.
@@ -151,6 +144,6 @@ pub enum Effect {
     ScanHistory,
     /// Load the full Models.dev snapshot for the reasoning map.
     LoadSnapshot,
-    /// Persist UI prefs (favorites, task history, last selections).
+    /// Persist UI prefs (favorites, last selections).
     SavePrefs,
 }

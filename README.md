@@ -36,8 +36,8 @@ The interactive TUI starts — no CLI flags. The tabs are:
    local / native / routed, `F` stars favorites) → models auto-load (source
    shown) → pick a model → reasoning level (`d` pins the current level as the
    model's persistent default, shown with ★) → system prompt (`d` sets the
-   default) → type a task (`Enter` inserts a newline, `Ctrl+Enter` runs it;
-   `↑`/`↓` recall past tasks).
+   default) → task prompt (the user instruction, selected from a list —
+   `Ctrl+Enter` runs the run).
 2. **Run** — multiple concurrent sessions (`[`/`]` switch) with a structured
    transcript of turns and tool calls, live token/cache/cost counters. Runs
    beyond the concurrency cap (`max_concurrent_runs`, default 2, in
@@ -45,9 +45,9 @@ The interactive TUI starts — no CLI flags. The tabs are:
    frees; queued sessions are cancellable.
 3. **Bulk runs** — `m` enables multi-select in the models pane, `Space`
    checks models **across providers** (selection survives switching), `x` on
-   the task launches them all after a confirmation modal. Each run uses its
-   model's pinned default reasoning level when one exists (clamped to what
-   the model supports).
+   the task prompt launches them all after a confirmation modal. Each run
+   uses its model's pinned default reasoning level when one exists (clamped
+   to what the model supports).
 4. **Reasoning** — every model across all 194 providers with its supported
    reasoning levels (type to filter, `D` cycles the ★ default on the
    selected model, `F5` reloads the snapshot).
@@ -56,16 +56,16 @@ The interactive TUI starts — no CLI flags. The tabs are:
 
 `:` opens the command palette (run, bulk run, cancel all, rescan history,
 open output dir, quit). Mouse clicks focus panes and switch tabs. Last
-selections, favorites, per-model reasoning defaults, task history and the
-concurrency cap persist in `~/.config/lmhub/ui.json`.
+selections, favorites, per-model reasoning defaults, the last task prompt
+and the concurrency cap persist in `~/.config/lmhub/ui.json`.
 
 ### Keybindings
 
 | Screen    | Keys                                                                                  |
 |-----------|---------------------------------------------------------------------------------------|
 | Global    | `q`/`Ctrl-C` quit (first press cancels runs, second forces), `:` palette, `Tab` next tab, mouse |
-| Setup     | `←`/`→` pane, type=search providers, `↑`/`↓` select, `Enter` connect/key, `F` favorite, `m` multi-select, `Space` toggle bulk, `C` clear bulk, `x` bulk-run, `F5` force-reload models, `r` reload models, `d` pin reasoning default / default prompt |
-| Task      | `Enter` newline, `Ctrl+Enter` run, `↑`/`↓` recall past tasks, `←`/`→` move cursor, `Home`/`End` line start/end, `Backspace`/`Delete` delete, `x` bulk-run; bracketed paste (multi-line) inserts at the cursor |
+| Setup     | `←`/`→` pane, type=search providers, `↑`/`↓` select, `Enter` connect/key, `F` favorite, `m` multi-select, `Space` toggle bulk, `C` clear bulk, `x` bulk-run, `F5` force-reload models, `r` reload models, `d` pin reasoning default / default prompt / default task prompt |
+| Task      | `↑`/`↓` select task prompt, `Ctrl+Enter` run, `d` set default task prompt, `x` bulk-run |
 | Run       | `[`/`]` previous/next session, `↑`/`↓` scroll transcript, `c` cancel session, `C` cancel all, `R` rerun, `v` raw feed, `Enter` run detail |
 | History   | `↑`/`↓` select, `Enter` detail, `F5` rescan                                            |
 | Reasoning | type=filter, `↑`/`↓` select, `D` cycle ★ default, `Esc` clear, `F5` reload snapshot   |
@@ -83,9 +83,16 @@ Custom providers live in [`providers/`](providers/) as TOML files — see
 requires **no changes to the runner core**, and a custom entry overrides a
 bundled provider with the same `id`.
 
-System prompts are markdown files in `prompts/` (+ `~/.config/lmhub/prompts`):
-`default.md` is materialized on first run, and prompt files are deduped by
-name across those directories.
+Prompts are markdown files split into two lists, both discovered across
+`prompts/` (+ `~/.config/lmhub/prompts`, + cache) and deduped by name:
+
+- **System prompts** — files at the root of each `prompts/` dir (backward
+  compatible with the old layout) plus `prompts/system-prompts/`;
+  `default.md` is materialized on first run.
+- **Task prompts** — the user instruction sent as the first message, in
+  `prompts/task-prompts/`; a `default.md` is materialized there on first
+  run. The old free-text task editor is gone: pick a task prompt from the
+  list (or write your own `*.md`).
 
 ## Output layout
 
@@ -262,6 +269,7 @@ until fixed, zero/absurd values are clamped with a warning):
 
 ```toml
 default_prompt = "default"
+default_task_prompt = "build"
 run_timeout_secs = 900        # wall-clock deadline per run
 max_turns = 30                # agent loop cap
 command_timeout_secs = 90     # per run_command invocation
@@ -277,7 +285,8 @@ retry_cap_ms = 30000
 ```
 
 UI preferences (last selections, favorites, per-model reasoning defaults,
-task history, concurrency cap) live separately in `~/.config/lmhub/ui.json`:
+last task prompt, concurrency cap) live separately in
+`~/.config/lmhub/ui.json`:
 
 ```json
 {
@@ -285,10 +294,9 @@ task history, concurrency cap) live separately in `~/.config/lmhub/ui.json`:
   "last_model": "claude-3-7-sonnet",
   "last_reasoning": "high",
   "last_prompt": "default",
-  "last_task": "build a small CLI",
+  "last_task_prompt": "refactor",
   "favorites": ["openai"],
   "model_defaults": { "gpt-4o": "medium", "claude-3-7-sonnet": "high" },
-  "task_history": ["build a small CLI", "…"],
   "max_concurrent_runs": 2
 }
 ```
@@ -307,7 +315,8 @@ the full test suite (`--locked`), a release build smoke, `cargo audit`
 models.dev snapshot-drift check that fails if `xtask gen-providers` would
 change the bundled catalog. Tagging `v*` builds release binaries for linux
 (x86_64, aarch64-musl via cross) and macOS (x86_64, aarch64); tarballs ship
-the binary plus `prompts/*.md` and `providers/example.toml.example`.
+the binary plus `prompts/*.md`, `prompts/system-prompts/`,
+`prompts/task-prompts/` and `providers/example.toml.example`.
 
 ## Architecture
 

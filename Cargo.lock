@@ -1354,6 +1354,7 @@ dependencies = [
  "lmhub-tui",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-util",
  "toml",

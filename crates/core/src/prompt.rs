@@ -32,13 +32,29 @@ Be efficient: avoid unnecessary re-reads, keep files reasonably sized."#;
 /// Load a prompt file; fall back to the built-in prompt on any failure
 /// (missing file, unreadable, invalid UTF-8).
 pub fn load_prompt(path: &Path) -> String {
+    load_prompt_file(path, DEFAULT_SYSTEM_PROMPT, "prompt")
+}
+
+/// Default user instruction (the first user message) when no task prompt
+/// file is configured — a deliberately generic build request so the agent
+/// system prompt's "implement the requested application" rule still applies.
+pub const DEFAULT_TASK_PROMPT: &str = r#"Build a small application from scratch inside the workspace: pick an appropriate stack, implement it with complete files, verify it runs, and finish with a concise summary of what you built and how to run it."#;
+
+/// Load a task prompt file; falls back to [`DEFAULT_TASK_PROMPT`] on any
+/// failure (missing file, unreadable, invalid UTF-8) — never to the system
+/// prompt, since that would silently change the agent's role.
+pub fn load_task_prompt(path: &Path) -> String {
+    load_prompt_file(path, DEFAULT_TASK_PROMPT, "task prompt")
+}
+
+fn load_prompt_file(path: &Path, fallback: &str, what: &str) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|_e| {
         eprintln!(
-            "lmhub: prompt file {} unreadable ({}); using built-in default",
+            "lmhub: {what} file {} unreadable ({}); using built-in default",
             path.display(),
             _e
         );
-        DEFAULT_SYSTEM_PROMPT.to_string()
+        fallback.to_string()
     })
 }
 
@@ -50,5 +66,12 @@ mod tests {
     fn falls_back_on_missing_file() {
         let p = load_prompt(Path::new("/nonexistent/prompt.md"));
         assert_eq!(p, DEFAULT_SYSTEM_PROMPT);
+    }
+
+    #[test]
+    fn task_prompt_falls_back_to_task_default() {
+        let p = load_task_prompt(Path::new("/nonexistent/task.md"));
+        assert_eq!(p, DEFAULT_TASK_PROMPT);
+        assert_ne!(p, DEFAULT_SYSTEM_PROMPT);
     }
 }

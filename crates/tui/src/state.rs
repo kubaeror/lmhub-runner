@@ -178,12 +178,8 @@ pub struct SetupState {
     pub catalog_cache: std::collections::BTreeMap<String, CachedCatalog>,
     pub reasoning_idx: usize,
     pub prompt_idx: usize,
-    pub task_input: String,
-    /// Byte offset of the edit cursor inside `task_input` (always on a char
-    /// boundary). Only meaningful when the Task pane is focused.
-    pub task_cursor: usize,
-    /// Position in the recalled task history (None = typing fresh text).
-    pub task_recall_idx: Option<usize>,
+    /// Index into [`State::task_prompts`] (the Task pane's list).
+    pub task_prompt_idx: usize,
     /// Multi-select mode for models (bulk start).
     pub multi_select: bool,
     /// Global (provider_id, model_id) selection — survives provider switches.
@@ -206,14 +202,12 @@ pub struct SessionPrefs {
     pub last_model: Option<String>,
     pub last_reasoning: Option<String>,
     pub last_prompt: Option<String>,
-    pub last_task: Option<String>,
+    pub last_task_prompt: Option<String>,
     #[serde(skip_serializing_if = "BTreeSet::is_empty")]
     pub favorites: BTreeSet<String>,
     /// Per-model default reasoning level (model id → level).
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub model_defaults: std::collections::BTreeMap<String, ReasoningLevel>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub task_history: Vec<String>,
     pub max_concurrent_runs: usize,
 }
 
@@ -231,16 +225,6 @@ impl SessionPrefs {
     pub fn save(&self, path: &PathBuf) {
         if let Ok(json) = serde_json::to_string_pretty(self) {
             let _ = std::fs::write(path, json);
-        }
-    }
-    pub fn remember_task(&mut self, task: String) {
-        if task.is_empty() {
-            return;
-        }
-        self.task_history.retain(|t| *t != task);
-        self.task_history.push(task);
-        if self.task_history.len() > 10 {
-            self.task_history.drain(..self.task_history.len() - 10);
         }
     }
 }
@@ -268,6 +252,7 @@ pub struct State {
     pub config_path: PathBuf,
     pub prefs_path: PathBuf,
     pub prompts: Vec<PromptFile>,
+    pub task_prompts: Vec<PromptFile>,
     pub output_base: PathBuf,
     pub ui_tx: UnboundedSender<UiMsg>,
 
@@ -302,6 +287,7 @@ impl State {
         config: AppConfig,
         config_path: PathBuf,
         prompts: Vec<PromptFile>,
+        task_prompts: Vec<PromptFile>,
         output_base: PathBuf,
         ui_tx: UnboundedSender<UiMsg>,
     ) -> Self {
@@ -316,6 +302,17 @@ impl State {
             .as_ref()
             .and_then(|name| prompts.iter().position(|p| &p.name == name))
             .unwrap_or(0);
+        let task_prompt_idx = config
+            .default_task_prompt
+            .as_ref()
+            .and_then(|name| task_prompts.iter().position(|p| &p.name == name))
+            .or_else(|| {
+                prefs
+                    .last_task_prompt
+                    .as_ref()
+                    .and_then(|name| task_prompts.iter().position(|p| &p.name == name))
+            })
+            .unwrap_or(0);
 
         let mut state = Self {
             registry,
@@ -326,6 +323,7 @@ impl State {
             config_path,
             prefs_path,
             prompts,
+            task_prompts,
             output_base,
             ui_tx,
             screen: crate::action::Screen::Setup,
@@ -337,6 +335,7 @@ impl State {
             prefs,
             setup: SetupState {
                 prompt_idx,
+                task_prompt_idx,
                 ..Default::default()
             },
             runs: RunRegistry {
@@ -351,10 +350,6 @@ impl State {
             requested_models_for: None,
         };
         // Restore last selections where possible.
-        if let Some(task) = state.prefs.last_task.clone() {
-            state.setup.task_input = task;
-            state.setup.task_cursor = state.setup.task_input.len();
-        }
         if let Some(pid) = state.prefs.last_provider.clone() {
             if let Some(idx) = state.registry.all().iter().position(|p| p.id() == pid) {
                 state.setup.provider_idx = provider_row_index(&state, idx).unwrap_or(0);
