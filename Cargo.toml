@@ -49,7 +49,7 @@ sha2 = "0.11"
 hmac = "0.13"
 jsonwebtoken = "11"
 hex = "0.4"
-dirs = "6"
+dirs = "7"
 ratatui = "0.30"
 crossterm = "0.29"
 
