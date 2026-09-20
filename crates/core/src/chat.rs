@@ -148,6 +148,10 @@ pub struct ChatMessage {
     #[serde(default)]
     pub tool_name: Option<String>,
     pub is_error: bool,
+    /// Adapter-specific raw assistant blocks from the previous turn, echoed
+    /// back verbatim on the next request. This is the *history* side of the
+    /// pair: Anthropic thinking signatures, Gemini thought parts and similar
+    /// unparseable state live here (wire fidelity invariant).
     pub provider_state: Option<Value>,
 }
 
@@ -391,6 +395,10 @@ pub struct ChatResponse {
     pub usage: Usage,
     pub stop_reason: StopReason,
     /// Adapter-specific raw assistant payload to be echoed back in history.
+    /// This is the *response* side of the pair with
+    /// [`ChatMessage::provider_state`]: the agent copies it into the
+    /// assistant history message unchanged, so signed/opaque blocks survive
+    /// round-trips.
     pub raw_assistant_message: Option<Value>,
     /// Non-fatal issues detected by the adapter (retries, fallbacks).
     pub warnings: Vec<String>,

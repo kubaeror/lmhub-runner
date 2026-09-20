@@ -119,7 +119,9 @@ pub struct TokensBlock {
 #[serde(rename_all = "camelCase")]
 pub struct PerformanceBlock {
     pub tokens_per_second: Option<f64>,
-    pub turns: u64,
+    /// LLM requests issued for this run (one per loop turn; adapter-internal
+    /// retries are invisible here — they surface as `warnings`). Replaces the
+    /// old duplicate `turns` field (schema v2).
     pub llm_requests: u64,
     pub avg_llm_request_ms: Option<u64>,
     pub max_llm_request_ms: Option<u64>,
@@ -138,6 +140,8 @@ pub struct ToolCallsBlock {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CacheBlock {
+    /// Prompt caching was requested for this run (config + provider and model
+    /// both advertise support) — not whether the provider actually hit.
     pub enabled: bool,
     pub provider_cache_supported: bool,
     pub provider_cache_used: Option<bool>,
@@ -187,10 +191,19 @@ pub struct ErrorsBlock {
     pub log_path: String,
 }
 
+/// Current `statistics.json` schema version.
+///
+/// History: v1 had no version field and a duplicate `performance.turns`
+/// (= `llmRequests`). v2 adds `schemaVersion` and drops `turns`; readers must
+/// treat a missing version as v1 and simply ignore unknown fields.
+pub const SCHEMA_VERSION: u32 = 2;
+
 /// The exact document persisted as `statistics.json`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StatisticsDocument {
+    /// Schema version of this document ([`SCHEMA_VERSION`] at build time).
+    pub schema_version: u32,
     pub status: RunStatus,
     pub run_id: String,
     pub provider: String,
@@ -241,6 +254,7 @@ pub fn build_document(
     };
 
     StatisticsDocument {
+        schema_version: SCHEMA_VERSION,
         status,
         run_id: run_id.to_string(),
         provider: identity.provider.to_string(),
@@ -262,7 +276,6 @@ pub fn build_document(
         },
         performance: PerformanceBlock {
             tokens_per_second: tps,
-            turns: metrics.llm_requests,
             llm_requests: metrics.llm_requests,
             avg_llm_request_ms: metrics
                 .llm_duration_ms_total
@@ -344,5 +357,34 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(m.provider_cache_used, Some(true));
+    }
+
+    #[test]
+    fn document_is_schema_v2_without_duplicate_turns() {
+        let metrics = RunMetrics::new(true, true);
+        let doc = build_document(
+            RunStatus::Completed,
+            "run-1",
+            &RunIdentity {
+                provider: "p".into(),
+                provider_type: "t".into(),
+                family: "f".into(),
+                model: "m".into(),
+                reasoning: "off".into(),
+                started_at: "2026-01-01T00:00:00.000Z".into(),
+            },
+            &metrics,
+            std::time::Duration::from_millis(5),
+            PricingBlock::unavailable(),
+            "errors.log",
+            "2026-01-01T00:00:01.000Z".into(),
+        );
+        let v = serde_json::to_value(&doc).unwrap();
+        assert_eq!(v["schemaVersion"], SCHEMA_VERSION);
+        assert_eq!(v["performance"]["llmRequests"], 0);
+        assert!(
+            v["performance"].get("turns").is_none(),
+            "the duplicate turns field is gone in v2"
+        );
     }
 }

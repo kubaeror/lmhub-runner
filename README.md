@@ -134,15 +134,19 @@ output/
 The family is decided by: explicit override → models.dev metadata → an
 id-prefix heuristic.
 
-- **`statistics.json`** (camelCase): `status` (completed/error/timeout/
-  cancelled/limit_exceeded — written for **every** terminal state, including
-  panics), `runId` (traceable to the directory suffix), provider/model/
-  family/reasoning, `tokens` (input, output, reasoning, cacheRead/cacheWrite,
-  total, cacheHitRatio), `performance` (tokensPerSecond, turns, llmRequests,
-  avg/max request ms), `toolCalls` (total/successful/failed + ratios),
-  `cache`, `pricing` (source, fetchedAt, snapshotVersion, prices and computed
-  USD — all `null` when unknown), `errors.count` + `errors.logPath`,
-  `warningsCount`.
+- **`statistics.json`** (camelCase, `schemaVersion: 2`): `status` (completed/
+  error/timeout/cancelled/limit_exceeded — written for **every** terminal
+  state, including panics), `runId` (traceable to the directory suffix),
+  provider/model/family/reasoning, `tokens` (input, output, reasoning,
+  cacheRead/cacheWrite, total, cacheHitRatio), `performance`
+  (tokensPerSecond, llmRequests, avg/max request ms), `toolCalls`
+  (total/successful/failed + ratios), `cache` (`enabled` = caching was
+  requested; `providerCacheSupported`; `providerCacheUsed`), `pricing`
+  (source, fetchedAt, snapshotVersion, prices and computed USD — all `null`
+  when unknown), `errors.count` + `errors.logPath`, `warningsCount`.
+  **v2 migration**: `schemaVersion` was added and the duplicate
+  `performance.turns` (= `llmRequests`) was dropped; a missing version means
+  v1 and readers ignore unknown fields.
 - **`events.jsonl`** — one JSON object per line (`run_started`,
   `turn_started`, `llm_response`, `tool_call`, `sandbox_violation`,
   `warning`, `error`, `run_finished`). Streaming deltas are UI-only and never

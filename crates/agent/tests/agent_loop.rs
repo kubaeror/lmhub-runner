@@ -271,8 +271,9 @@ async fn happy_path_writes_full_output_structure() {
         "dir {run_component} does not end with {run_id}"
     );
     // performance block is populated (two LLM turns, durations recorded).
+    assert_eq!(stats["schemaVersion"], 2);
     assert_eq!(stats["performance"]["llmRequests"], 2);
-    assert_eq!(stats["performance"]["turns"], 2);
+    assert!(stats["performance"].get("turns").is_none());
     assert_eq!(stats["performance"]["maxLlmRequestMs"], 7);
 
     // events.jsonl: parseable JSONL with a successful tool call event
