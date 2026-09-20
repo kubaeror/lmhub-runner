@@ -61,6 +61,9 @@ pub fn highlighted(text: &str, query: &str, base: Style, highlight: Style) -> Ve
     out
 }
 
+/// How long a transient notice stays in the status line.
+const NOTICE_TTL_SECS: u64 = 6;
+
 /// Command-isolation label, always visible in the status line: the user must
 /// be able to tell whether `run_command` is sandboxed, unsandboxed, or off.
 fn isolation_label(state: &State) -> &'static str {
@@ -77,7 +80,7 @@ fn isolation_label(state: &State) -> &'static str {
 pub fn status_line(state: &State) -> String {
     let iso = isolation_label(state);
     if let Some((msg, at)) = &state.notice {
-        if at.elapsed().as_secs() < 6 {
+        if at.elapsed().as_secs() < NOTICE_TTL_SECS {
             return format!("{iso} ⓘ {msg} ");
         }
     }

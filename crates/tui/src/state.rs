@@ -21,7 +21,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 
 /// Modal overlays on top of a screen.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Modal {
     /// Typing an API key for `provider_id`.
     EnterKey {
@@ -38,6 +38,37 @@ pub enum Modal {
     HistoryDetail { text: String, scroll: usize },
     /// Outcome of a session (final text, paths).
     RunDetail { run_id: u64 },
+}
+
+/// Manual `Debug`: a `Modal::EnterKey` holds an API key; it must never be
+/// printed by a `{:?}` in a log line.
+impl std::fmt::Debug for Modal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EnterKey { provider_id, input } => f
+                .debug_struct("EnterKey")
+                .field("provider_id", provider_id)
+                .field(
+                    "input",
+                    &format_args!("[redacted; {} chars]", input.as_str().chars().count()),
+                )
+                .finish(),
+            Self::Palette { filter, cursor } => f
+                .debug_struct("Palette")
+                .field("filter", &filter.as_str())
+                .field("cursor", cursor)
+                .finish(),
+            Self::Help => f.write_str("Help"),
+            Self::BulkConfirm => f.write_str("BulkConfirm"),
+            Self::HistoryDetail { scroll, .. } => f
+                .debug_struct("HistoryDetail")
+                .field("scroll", scroll)
+                .finish(),
+            Self::RunDetail { run_id } => {
+                f.debug_struct("RunDetail").field("run_id", run_id).finish()
+            }
+        }
+    }
 }
 
 /// Focusable panes on the Setup screen.
@@ -384,6 +415,10 @@ pub struct HistoryState {
 pub struct MapState {
     pub filter: EditField,
     pub idx: usize,
+    /// Cached rendered rows for the current filter + snapshot/catalog state.
+    /// Recomputed by [`State::refresh_map_rows`] on every input change so the
+    /// view does not rebuild the (potentially large) model list per frame.
+    cache: Option<Vec<crate::reasoning_map::MapModel>>,
 }
 
 pub struct State {
@@ -705,8 +740,16 @@ impl State {
         rows.get(self.map.idx).cloned()
     }
 
-    /// All reasoning-map rows after applying the current filter.
+    /// All reasoning-map rows after applying the current filter. Served from
+    /// the cache populated by [`Self::refresh_map_rows`] when available.
     pub fn map_rows(&self) -> Vec<crate::reasoning_map::MapModel> {
+        if let Some(rows) = &self.map.cache {
+            return rows.clone();
+        }
+        self.compute_map_rows()
+    }
+
+    fn compute_map_rows(&self) -> Vec<crate::reasoning_map::MapModel> {
         let Some(snapshot) = &self.snapshot_all else {
             return Vec::new();
         };
@@ -714,6 +757,12 @@ impl State {
             &crate::reasoning_map::all_models(snapshot, &self.setup.catalog_cache),
             self.map.filter.as_str(),
         )
+    }
+
+    /// Recompute the cached map rows. Call after the filter, snapshot or
+    /// cached catalogs change.
+    pub(crate) fn refresh_map_rows(&mut self) {
+        self.map.cache = Some(self.compute_map_rows());
     }
 
     pub fn selected_pricing(&self) -> Option<PricingContext> {
@@ -747,7 +796,7 @@ impl State {
         }
         for env_key in p.env_keys() {
             if std::env::var(env_key)
-                .map(|v| v.len() >= 8)
+                .map(|v| v.len() >= lmhub_core::redact::MIN_SECRET_LEN)
                 .unwrap_or(false)
             {
                 return "[key ok]";
@@ -1022,5 +1071,20 @@ mod prefs_tests {
     #[test]
     fn prefs_default_is_a_sane_two() {
         assert_eq!(SessionPrefs::default().max_concurrent_runs, 2);
+    }
+
+    #[test]
+    fn modal_debug_redacts_api_keys() {
+        let modal = Modal::EnterKey {
+            provider_id: "openai".into(),
+            input: EditField::from_value("sk-super-secret-value"),
+        };
+        let rendered = format!("{modal:?}");
+        assert!(
+            !rendered.contains("sk-super-secret-value"),
+            "raw key leaked into Debug: {rendered}"
+        );
+        assert!(rendered.contains("[redacted"), "{rendered}");
+        assert!(rendered.contains("openai"), "{rendered}");
     }
 }

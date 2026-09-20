@@ -31,7 +31,7 @@ pub fn resolve(
     }
     for env_key in env_keys {
         if let Ok(value) = std::env::var(env_key) {
-            if !value.trim().is_empty() && value.len() >= 8 {
+            if !value.trim().is_empty() && value.len() >= lmhub_core::redact::MIN_SECRET_LEN {
                 tracing::debug!(provider = provider_id, source = %env_key, "credential resolved");
                 return Some(ResolvedCredential {
                     secret: value,

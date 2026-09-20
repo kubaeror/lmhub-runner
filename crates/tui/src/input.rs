@@ -86,6 +86,11 @@ impl EditField {
         self.cursor = self.value.len();
     }
 
+    /// Byte offset of the cursor (used to render a real caret).
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
     /// Insert `text` at the cursor. The caller strips control characters
     /// (see `reduce::paste_text`); this just splices chars in order.
     pub fn paste(&mut self, text: &str) {

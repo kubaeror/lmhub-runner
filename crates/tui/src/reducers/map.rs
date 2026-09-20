@@ -11,6 +11,7 @@ impl State {
         match action {
             Action::MapClear => {
                 self.map.filter.clear();
+                self.refresh_map_rows();
                 self.map.idx = 0;
                 Vec::new()
             }
@@ -25,6 +26,7 @@ impl State {
             Action::SetModelDefault => self.set_model_default(),
             Action::ReloadSnapshot => {
                 self.snapshot_all = None;
+                self.refresh_map_rows();
                 vec![Effect::LoadSnapshot]
             }
             Action::MouseSelectRow {

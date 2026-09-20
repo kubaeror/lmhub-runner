@@ -55,7 +55,9 @@ impl State {
             }
             Action::ScrollHistoryDetail(delta) => {
                 if let Some(Modal::HistoryDetail { text, scroll }) = &mut self.modal {
-                    let max = text.lines().count().saturating_sub(1);
+                    // Offset from bottom (0 = newest line visible), matching
+                    // the transcript convention.
+                    let max = text.lines().count();
                     *scroll = ((*scroll as i32 + delta).max(0) as usize).min(max);
                 }
                 Vec::new()
@@ -138,6 +140,7 @@ impl State {
                 self.sync_selected_provider()
             }
             T::ReasoningMap => {
+                self.refresh_map_rows();
                 self.map.idx = self.map.idx.min(self.map_rows().len().saturating_sub(1));
                 Vec::new()
             }
@@ -228,6 +231,8 @@ impl State {
                 self.setup
                     .catalog_cache
                     .insert(requested_for.clone(), cache);
+                // Cached catalogs feed the reasoning map's model metadata.
+                self.refresh_map_rows();
                 if is_current {
                     self.requested_models_for = None;
                     self.setup.models_loading = false;
@@ -294,6 +299,7 @@ impl State {
             }
             crate::UiMsg::SnapshotLoaded(snapshot) => {
                 self.snapshot_all = Some(snapshot);
+                self.refresh_map_rows();
                 self.map.idx = self.map.idx.min(self.map_rows().len().saturating_sub(1));
                 Vec::new()
             }
@@ -333,14 +339,6 @@ impl State {
             self.push_notice(format!("queued run {model} started"));
         }
         effects
-    }
-
-    fn restore_last_model(&mut self) {
-        if let Some(mid) = &self.prefs.last_model {
-            if let Some(idx) = self.setup.models.iter().position(|m| &m.id == mid) {
-                self.setup.model_idx = idx;
-            }
-        }
     }
 
     // ---- paste ------------------------------------------------------------

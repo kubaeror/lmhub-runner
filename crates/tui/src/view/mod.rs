@@ -234,17 +234,24 @@ pub fn mouse_wheel_action(
                 if info.setup_panes[i].contains(pos) {
                     return match pane {
                         // The reasoning-levels strip cycles instead of
-                        // scrolling.
-                        Pane::Reasoning => Some(Action::CycleReasoning(dir)),
-                        _ => Some(Action::MouseWheelSetup { pane: *pane, dir }),
+                        // scrolling (wheel up = previous, like ↑).
+                        Pane::Reasoning => Some(Action::CycleReasoning(-dir)),
+                        // List panes move their selection: wheel up (dir=1)
+                        // must behave like ↑ (previous item), so negate.
+                        _ => Some(Action::MouseWheelSetup {
+                            pane: *pane,
+                            dir: -dir,
+                        }),
                     };
                 }
             }
             None
         }
+        // Transcript/detail scrolls use the "offset from bottom" convention:
+        // wheel up = move back through history, same as ↑.
         Screen::Run => Some(Action::ScrollTranscript(dir)),
-        Screen::History => Some(Action::MoveHistory(dir)),
-        Screen::Reasoning => Some(Action::MapMove(dir)),
+        Screen::History => Some(Action::MoveHistory(-dir)),
+        Screen::Reasoning => Some(Action::MapMove(-dir)),
     }
 }
 
@@ -552,12 +559,12 @@ mod tests {
             mouse_wheel_action(&state, &info, 10, 10, 1),
             Some(Action::MouseWheelSetup {
                 pane: Pane::Providers,
-                dir: 1
+                dir: -1
             })
         ));
         assert!(matches!(
             mouse_wheel_action(&state, &info, 85, 8, -1),
-            Some(Action::CycleReasoning(-1))
+            Some(Action::CycleReasoning(1))
         ));
         // Wheel over "Model details" (unmapped rect) does nothing.
         assert!(mouse_wheel_action(&state, &info, 85, 3, 1).is_none());
@@ -575,12 +582,12 @@ mod tests {
         state.screen = Screen::History;
         assert!(matches!(
             mouse_wheel_action(&state, &info, 50, 10, -1),
-            Some(Action::MoveHistory(-1))
+            Some(Action::MoveHistory(1))
         ));
         state.screen = Screen::Reasoning;
         assert!(matches!(
             mouse_wheel_action(&state, &info, 50, 10, 1),
-            Some(Action::MapMove(1))
+            Some(Action::MapMove(-1))
         ));
     }
 

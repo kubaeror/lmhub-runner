@@ -192,6 +192,11 @@ pub enum Effect {
     LoadSnapshot,
     /// Persist UI prefs (favorites, last selections).
     SavePrefs,
+    /// Persist config.toml (default prompt / task prompt changed).
+    SaveConfig,
+    /// Persist one API key entered in the TUI. Blocking auth.json write is
+    /// offloaded; the outcome arrives as `UiMsg::Notice`.
+    SaveKey { provider_id: String, key: String },
     /// Run the GitHub Copilot device-flow (long-running; results arrive as
     /// `UiMsg::Notice`).
     RunCopilotFlow,

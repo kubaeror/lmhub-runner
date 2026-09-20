@@ -196,7 +196,7 @@ fn push_turn(lines: &mut Vec<Line<'static>>, turn: &crate::transcript::Turn, max
         ),
         Span::styled(meta, Style::default().fg(Color::DarkGray)),
     ]));
-    let text: String = turn.llm_text.chars().take(4_000).collect();
+    let text: String = turn.llm_text.chars().take(TURN_TEXT_CAP).collect();
     for chunk in wrap_chunks(&text, max_w) {
         lines.push(Line::styled(chunk, Style::default()));
     }
@@ -219,6 +219,9 @@ fn push_turn(lines: &mut Vec<Line<'static>>, turn: &crate::transcript::Turn, max
         lines.push(Line::from(spans));
     }
 }
+
+/// Per-turn text cap in the transcript (chars) before eliding.
+const TURN_TEXT_CAP: usize = 4_000;
 
 /// Simple character-based wrapping (UTF-8 safe).
 fn wrap_chunks(text: &str, max_w: usize) -> Vec<String> {

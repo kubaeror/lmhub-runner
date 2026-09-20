@@ -6,7 +6,6 @@ use crate::action::{Action, Effect};
 use crate::input::EditField;
 use crate::state::{Modal, Pane, RunSession, RunSessionStatus, State};
 use crate::transcript::Transcript;
-use lmhub_core::StoredCredential;
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -129,10 +128,7 @@ impl State {
                 }
                 Vec::new()
             }
-            Action::SaveKey => {
-                self.save_entered_key();
-                Vec::new()
-            }
+            Action::SaveKey => self.save_entered_key(),
             Action::MouseWheelSetup { pane, dir } => {
                 self.setup.focus = pane;
                 match pane {
@@ -265,33 +261,24 @@ impl State {
         }
     }
 
-    /// `Enter` inside the key-entry modal: validate + persist the key.
-    fn save_entered_key(&mut self) -> bool {
+    /// `Enter` inside the key-entry modal: validate and hand the key to the
+    /// event loop (the auth.json write happens off the UI thread).
+    fn save_entered_key(&mut self) -> Vec<Effect> {
         let Some(Modal::EnterKey { provider_id, input }) = &self.modal else {
-            return false;
+            return Vec::new();
         };
         let id = provider_id.clone();
         let key = input.as_str().trim().to_string();
-        if key.len() < 8 {
+        if key.len() < lmhub_core::redact::MIN_SECRET_LEN {
             self.push_notice("key too short");
-            return false;
+            return Vec::new();
         }
-        let save_result = {
-            let mut store = self.auth_store.lock().unwrap();
-            store.set_credential(&id, StoredCredential::api(key));
-            store.save()
-        };
-        match save_result {
-            Ok(()) => {
-                self.modal = None;
-                self.push_notice(format!("saved key for {id}"));
-                true
-            }
-            Err(e) => {
-                self.push_notice(format!("✖ saving auth.json failed: {e}"));
-                false
-            }
-        }
+        self.modal = None;
+        self.push_notice(format!("saving key for {id}…"));
+        vec![Effect::SaveKey {
+            provider_id: id,
+            key,
+        }]
     }
 
     // ---- bulk --------------------------------------------------------------
@@ -320,12 +307,10 @@ impl State {
             return Vec::new();
         };
         self.config.default_task_prompt = Some(p.name.clone());
-        match self.config.save(&self.config_path) {
-            Ok(()) => self.push_notice(format!("default task prompt → {}", p.name)),
-            Err(e) => self.push_notice(format!("✖ could not save config: {e}")),
-        }
+        self.push_notice(format!("default task prompt → {}", p.name));
         self.capture_prefs();
-        vec![Effect::SavePrefs]
+        // The config write happens in the event loop.
+        vec![Effect::SaveConfig, Effect::SavePrefs]
     }
 
     fn set_default_prompt(&mut self) -> Vec<Effect> {
@@ -333,12 +318,9 @@ impl State {
             return Vec::new();
         };
         self.config.default_prompt = Some(p.name.clone());
-        match self.config.save(&self.config_path) {
-            Ok(()) => self.push_notice(format!("default prompt → {}", p.name)),
-            Err(e) => self.push_notice(format!("✖ could not save config: {e}")),
-        }
+        self.push_notice(format!("default prompt → {}", p.name));
         self.capture_prefs();
-        vec![Effect::SavePrefs]
+        vec![Effect::SaveConfig, Effect::SavePrefs]
     }
 
     // ---- runs --------------------------------------------------------------
@@ -406,6 +388,20 @@ impl State {
         if self.selected_task_prompt().is_none() {
             self.push_notice("no task prompt available — add one to prompts/task-prompts/");
             return Vec::new();
+        }
+        // Pricing is evaluated per spec: list the routes whose price is
+        // unknown so the confirmation is not mistaken for a cost estimate.
+        let unknown: Vec<String> = self
+            .bulk_specs()
+            .into_iter()
+            .filter(|s| s.pricing.is_none())
+            .map(|s| format!("{}/{}", s.provider_id, s.model_id))
+            .collect();
+        if !unknown.is_empty() {
+            self.push_notice(format!(
+                "⚠ no Models.dev price for {} (cost will be null)",
+                unknown.join(", ")
+            ));
         }
         self.modal = Some(Modal::BulkConfirm);
         Vec::new()

@@ -10,7 +10,7 @@
 │GitHub Copilot [no key]      │║│                                  ││                              │
 │GitLab Duo [no key]          │║│                                  ││                              │
 │Google [no key]    ┌ API key for openai (Enter=save, Esc=cancel) ─────────────┐                   │
-│OpenAI [no key]    │•••••••••••••|                                            │                   │
+│OpenAI [no key]    │•••••••••••••▏                                            │                   │
 │Vertex [no key]    │                                                          │                   │
 │Vertex (Anthropic) │                                                          │                   │
 │watsonx.ai [no key]└──────────────────────────────────────────────────────────┘                   │

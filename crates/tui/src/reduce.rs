@@ -693,6 +693,23 @@ mod tests {
     }
 
     #[test]
+    fn bulk_start_warns_about_unknown_prices() {
+        let (mut state, _dir) = crate::testutil::test_state();
+        seed_catalog(&mut state, "openai", &["gpt-4o"]);
+        state.setup.models = vec![reasoning_model("gpt-4o")];
+        seed_task_prompts(&mut state, &["build"]);
+        state.setup.bulk = std::collections::BTreeSet::from([("openai".into(), "gpt-4o".into())]);
+
+        state.reduce(Action::BulkStart);
+        assert!(state.modal.is_some(), "confirmation still opens");
+        let (notice, _) = state.notice.as_ref().expect("pricing warning");
+        assert!(
+            notice.contains("no Models.dev price") && notice.contains("openai/gpt-4o"),
+            "{notice}"
+        );
+    }
+
+    #[test]
     fn bulk_uses_per_model_default_reasoning() {
         let (mut state, _dir) = crate::testutil::test_state();
         state.setup.selected_provider_id = Some("openai".into());

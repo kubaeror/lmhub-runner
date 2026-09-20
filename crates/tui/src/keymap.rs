@@ -169,10 +169,10 @@ fn setup_keys(state: &State, key: KeyEvent) -> Option<Action> {
             KeyCode::Up => Some(Action::CycleTaskPrompt(-1)),
             KeyCode::Down => Some(Action::CycleTaskPrompt(1)),
             KeyCode::Char('d') => Some(Action::SetDefaultTaskPrompt),
-            // Ctrl+Enter runs the selected task prompt — chat-UI convention.
-            KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                Some(Action::StartRun)
-            }
+            // Ctrl+Enter runs the selected task prompt (chat-UI convention);
+            // plain Enter is accepted for terminals that do not report the
+            // modifier at all.
+            KeyCode::Enter => Some(Action::StartRun),
             KeyCode::Char('x') => Some(Action::BulkStart),
             _ => None,
         },
@@ -376,6 +376,11 @@ mod tests {
         ));
         assert!(matches!(
             dispatch(&s, KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)),
+            Some(Action::StartRun)
+        ));
+        // Plain Enter is accepted too (terminals without modifier reporting).
+        assert!(matches!(
+            dispatch(&s, key(KeyCode::Enter)),
             Some(Action::StartRun)
         ));
         assert!(matches!(
