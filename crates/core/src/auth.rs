@@ -115,14 +115,29 @@ impl AuthStore {
     }
 
     /// Persist atomically with owner-only permissions on unix.
+    ///
+    /// The tmp file is created with mode `0600` up front (no window where the
+    /// secret is world-readable before a chmod); a stale tmp from an older
+    /// build is re-chmodded before the rename.
     pub fn save(&self) -> std::io::Result<()> {
+        use std::io::Write as _;
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let rendered = serde_json::to_string_pretty(&self.entries)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         let tmp = self.path.with_extension("tmp");
-        std::fs::write(&tmp, rendered)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).write(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&tmp)?;
+        file.write_all(rendered.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -136,15 +151,28 @@ impl AuthStore {
     }
 
     /// Every secret value in the store (for redaction registration).
+    ///
+    /// Registers **all** fields of every credential — key, access token and
+    /// refresh token — not just the currently active secret: an expired
+    /// token that is not used for requests can still end up in a log line
+    /// and must be scrubbed.
     pub fn all_secrets(&self) -> Vec<String> {
-        self.entries
-            .values()
-            .filter_map(|c| {
-                c.active_secret()
-                    .map(|s| s.to_string())
-                    .or_else(|| c.key.clone())
-            })
-            .collect()
+        let mut secrets = Vec::new();
+        for cred in self.entries.values() {
+            for secret in [
+                cred.key.as_deref(),
+                cred.access_token.as_deref(),
+                cred.refresh_token.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if !secret.is_empty() {
+                    secrets.push(secret.to_string());
+                }
+            }
+        }
+        secrets
     }
 }
 
@@ -185,5 +213,28 @@ mod tests {
             refresh_token: Some("refresh".into()),
         };
         assert_eq!(expired.active_secret(), Some("refresh"));
+    }
+
+    #[test]
+    fn all_secrets_includes_inactive_and_refresh_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = AuthStore::load(dir.path().join("auth.json"));
+        store.set_credential(
+            "p",
+            StoredCredential {
+                kind: "oauth".into(),
+                key: Some("key-abcdef123".into()),
+                access_token: Some("access-abcdef123".into()),
+                expires_at: Some(1), // expired: active_secret() returns refresh
+                refresh_token: Some("refresh-abcdef123".into()),
+            },
+        );
+        let mut secrets = store.all_secrets();
+        secrets.sort();
+        assert_eq!(
+            secrets,
+            vec!["access-abcdef123", "key-abcdef123", "refresh-abcdef123"],
+            "every stored field must be registered for redaction"
+        );
     }
 }

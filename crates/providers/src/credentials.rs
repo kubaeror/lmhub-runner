@@ -1,6 +1,7 @@
 //! Credential resolution: auth.json first, then environment variables.
 
 use lmhub_core::{AuthStore, CoreError};
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone)]
 pub struct ResolvedCredential {
@@ -32,6 +33,33 @@ pub fn resolve(
         }
     }
     None
+}
+
+/// [`resolve`] for adapters holding a shared store handle (native OpenAI/
+/// Anthropic, custom TOML providers).
+///
+/// Resolution happens per request so a key entered in the TUI applies without
+/// restarting the runner. Lock poisoning is recovered: the store is a plain
+/// map, so a panic elsewhere must not brick credential lookup.
+pub fn resolve_shared(
+    store: &Arc<Mutex<AuthStore>>,
+    provider_id: &str,
+    env_keys: &[String],
+) -> Option<ResolvedCredential> {
+    let guard = store.lock().unwrap_or_else(|e| e.into_inner());
+    resolve(&guard, provider_id, env_keys)
+}
+
+/// [`resolve_shared`] or the standard missing-credential error, for adapters
+/// that cannot proceed without a key.
+pub fn require_shared(
+    store: &Arc<Mutex<AuthStore>>,
+    provider_id: &str,
+    env_keys: &[String],
+) -> Result<String, CoreError> {
+    resolve_shared(store, provider_id, env_keys)
+        .map(|c| c.secret)
+        .ok_or_else(|| missing_error(provider_id, env_keys))
 }
 
 /// Standard error for a missing credential (never contains the secret).

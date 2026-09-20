@@ -1,11 +1,12 @@
 //! Native OpenAI adapter (api.openai.com, Chat Completions).
 
+use crate::credentials;
 use crate::http;
 use crate::wire_openai::{self, OpenAiWireOpts};
 use async_trait::async_trait;
-use lmhub_core::{ChatRequest, ChatResponse, CoreError, Provider, ProviderCaps, Result};
+use lmhub_core::{AuthStore, ChatRequest, ChatResponse, CoreError, Provider, ProviderCaps, Result};
 use serde_json::Value;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
@@ -20,10 +21,12 @@ pub struct NativeOpenAiProvider {
     pub api_key_env: String,
     /// Models.dev id for metadata lookup.
     pub models_dev_id: String,
+    /// Shared credential store: auth.json wins over the env var.
+    pub auth_store: Arc<Mutex<AuthStore>>,
 }
 
 impl NativeOpenAiProvider {
-    pub fn standard() -> Arc<dyn Provider> {
+    pub fn standard(auth_store: Arc<Mutex<AuthStore>>) -> Arc<dyn Provider> {
         Arc::new(Self {
             http: reqwest::Client::new(),
             base_url: DEFAULT_BASE_URL.to_string(),
@@ -31,6 +34,7 @@ impl NativeOpenAiProvider {
             name: "OpenAI".into(),
             api_key_env: "OPENAI_API_KEY".into(),
             models_dev_id: "openai".into(),
+            auth_store,
         })
     }
 
@@ -42,9 +46,17 @@ impl NativeOpenAiProvider {
         format!("{}/models", self.base_url.trim_end_matches('/'))
     }
 
+    /// auth.json → env → `missing_api_key`, resolved per request.
+    fn key(&self) -> Result<String> {
+        credentials::require_shared(
+            &self.auth_store,
+            &self.id,
+            std::slice::from_ref(&self.api_key_env),
+        )
+    }
+
     async fn post_chat(&self, payload: &Value) -> Result<ChatResponse> {
-        let key = std::env::var(&self.api_key_env)
-            .map_err(|_| CoreError::MissingApiKey(self.api_key_env.clone()))?;
+        let key = self.key()?;
         let headers = vec![("authorization".to_string(), format!("Bearer {key}"))];
         let started = Instant::now();
         let body = http::post_json(&self.http, &self.chat_url(), headers, payload).await?;
@@ -95,8 +107,7 @@ impl Provider for NativeOpenAiProvider {
     }
 
     async fn list_models_api(&self) -> Result<Option<Vec<String>>> {
-        let key = std::env::var(&self.api_key_env)
-            .map_err(|_| CoreError::MissingApiKey(self.api_key_env.clone()))?;
+        let key = self.key()?;
         let headers = vec![("authorization".to_string(), format!("Bearer {key}"))];
         let body = http::get_json(&self.http, &self.models_url(), headers).await?;
         Ok(Some(wire_openai::parse_models_list(&body)?))
@@ -161,8 +172,7 @@ impl Provider for NativeOpenAiProvider {
     }
 
     async fn chat_stream(&self, request: &ChatRequest) -> Result<lmhub_core::ChatStream> {
-        let key = std::env::var(&self.api_key_env)
-            .map_err(|_| CoreError::MissingApiKey(self.api_key_env.clone()))?;
+        let key = self.key()?;
         let url = self.chat_url();
         let headers = vec![("authorization".to_string(), format!("Bearer {key}"))];
         crate::stream_runner::openai_sse(&self.http, url, headers, request).await
@@ -172,4 +182,91 @@ impl Provider for NativeOpenAiProvider {
 fn is_tools_rejection(msg: &str) -> bool {
     let m = msg.to_ascii_lowercase();
     m.contains("'tools'") || m.contains("\"tools\"") || m.contains("tool use is not supported")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wire_test_util::{one_shot_server, sample_request};
+    use lmhub_core::{ReasoningLevel, StoredCredential};
+
+    const RESPONSE: &str = r#"{"id":"x","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#;
+
+    fn store_with(secret: &str) -> Arc<std::sync::Mutex<AuthStore>> {
+        let mut store = AuthStore::load(std::env::temp_dir().join("lmhub-test-auth-unused.json"));
+        store.set_credential("openai", StoredCredential::api(secret));
+        Arc::new(std::sync::Mutex::new(store))
+    }
+
+    fn provider(base_url: String, env_key: &str) -> NativeOpenAiProvider {
+        provider_with(base_url, env_key, store_with("sk-stored-1234567890"))
+    }
+
+    fn provider_with(
+        base_url: String,
+        env_key: &str,
+        auth_store: Arc<std::sync::Mutex<AuthStore>>,
+    ) -> NativeOpenAiProvider {
+        NativeOpenAiProvider {
+            http: reqwest::Client::new(),
+            base_url,
+            id: "openai".into(),
+            name: "OpenAI".into(),
+            api_key_env: env_key.into(),
+            models_dev_id: "openai".into(),
+            auth_store,
+        }
+    }
+
+    #[tokio::test]
+    async fn stored_credential_is_used_without_env() {
+        let env_key = "LMHUB_TEST_OPENAI_STORED_ONLY";
+        std::env::remove_var(env_key);
+        let (base, rx) = one_shot_server(200, "application/json", RESPONSE.into()).await;
+        let p = provider(base, env_key);
+        let resp = p.chat(&sample_request(ReasoningLevel::Off)).await.unwrap();
+        assert_eq!(resp.text, "hi");
+        let raw = rx.await.unwrap().to_ascii_lowercase();
+        assert!(
+            raw.contains("authorization: bearer sk-stored-1234567890"),
+            "auth.json key must be sent: {raw}"
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_json_wins_over_env() {
+        let env_key = "LMHUB_TEST_OPENAI_PRECEDENCE";
+        std::env::set_var(env_key, "env-value-1234567890");
+        let (base, rx) = one_shot_server(200, "application/json", RESPONSE.into()).await;
+        let p = provider(base, env_key);
+        p.chat(&sample_request(ReasoningLevel::Off)).await.unwrap();
+        let raw = rx.await.unwrap().to_ascii_lowercase();
+        assert!(raw.contains("sk-stored-1234567890"));
+        assert!(!raw.contains("env-value-1234567890"));
+    }
+
+    #[tokio::test]
+    async fn missing_key_and_env_reports_missing_api_key() {
+        let env_key = "LMHUB_TEST_OPENAI_NEVER_SET";
+        std::env::remove_var(env_key);
+        let (base, _rx) = one_shot_server(200, "application/json", RESPONSE.into()).await;
+        let p = provider_with(
+            base,
+            env_key,
+            Arc::new(std::sync::Mutex::new(AuthStore::load(
+                std::env::temp_dir().join("lmhub-test-auth-empty.json"),
+            ))),
+        );
+        let err = p
+            .chat(&sample_request(ReasoningLevel::Off))
+            .await
+            .unwrap_err();
+        match err {
+            CoreError::MissingApiKey(msg) => assert!(
+                msg.contains(env_key),
+                "missing-key error should name the env var: {msg}"
+            ),
+            other => panic!("expected MissingApiKey, got {other:?}"),
+        }
+    }
 }

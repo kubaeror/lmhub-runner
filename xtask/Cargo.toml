@@ -6,6 +6,7 @@ license = "MIT"
 publish = false
 
 [dependencies]
+lmhub-providers = { workspace = true }
 reqwest = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 serde_json = { workspace = true }

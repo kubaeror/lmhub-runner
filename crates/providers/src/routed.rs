@@ -29,7 +29,8 @@ pub struct RoutedProvider {
     /// Static base URL from the catalog/TOML; dynamic protocols resolve
     /// their own URLs at call time.
     pub base_url: Option<String>,
-    pub env_keys: Vec<String>,
+    /// Credential-bearing env vars only (catalog `key_envs`).
+    pub key_envs: Vec<String>,
     pub local_models: Vec<LocalModel>,
     pub models_dev_id: String,
     pub requires_key: bool,
@@ -45,7 +46,7 @@ impl RoutedProvider {
         display_name: String,
         protocol: ProtocolKind,
         base_url: Option<String>,
-        env_keys: Vec<String>,
+        key_envs: Vec<String>,
         models_dev_id: String,
         requires_key: bool,
         auth_store: Arc<std::sync::Mutex<AuthStore>>,
@@ -56,7 +57,7 @@ impl RoutedProvider {
             display_name,
             protocol,
             base_url,
-            env_keys,
+            key_envs,
             local_models,
             models_dev_id,
             requires_key,
@@ -73,13 +74,23 @@ impl RoutedProvider {
         if !self.requires_key {
             return Ok(String::new());
         }
+        // Catalog regression guard: `key_envs` must never contain display-only
+        // vars (that bug made `AZURE_RESOURCE_NAME` an "API key").
+        debug_assert!(
+            self.key_envs
+                .iter()
+                .all(|k| crate::known::is_secret_like_env_name(k)),
+            "provider `{}` passed non-credential env vars to key resolution: {:?}",
+            self.id,
+            self.key_envs
+        );
         let resolved = {
             let store = self.store();
-            credentials::resolve(&store, &self.id, &self.env_keys)
+            credentials::resolve(&store, &self.id, &self.key_envs)
         };
         resolved
             .map(|c| c.secret)
-            .ok_or_else(|| credentials::missing_error(&self.id, &self.env_keys))
+            .ok_or_else(|| credentials::missing_error(&self.id, &self.key_envs))
     }
 
     async fn chat_openai_wire(
@@ -138,11 +149,11 @@ impl Provider for RoutedProvider {
     }
 
     fn api_key_env(&self) -> &str {
-        self.env_keys.first().map(String::as_str).unwrap_or("-")
+        self.key_envs.first().map(String::as_str).unwrap_or("-")
     }
 
     fn env_keys(&self) -> Vec<String> {
-        self.env_keys.clone()
+        self.key_envs.clone()
     }
 
     fn requires_credentials(&self) -> bool {

@@ -26,16 +26,17 @@
 //! max_output = 8192
 //! ```
 
+use crate::credentials;
 use crate::http;
 use crate::wire_anthropic::{self, AnthropicWireOpts};
 use crate::wire_openai::{self, OpenAiWireOpts};
 use async_trait::async_trait;
 use lmhub_core::{
-    ChatRequest, ChatResponse, CoreError, LocalModel, Provider, ProviderCaps, Result,
+    AuthStore, ChatRequest, ChatResponse, CoreError, LocalModel, Provider, ProviderCaps, Result,
 };
 use serde::Deserialize;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum ApiType {
@@ -160,19 +161,34 @@ impl CustomProviderConfig {
 pub struct CustomProvider {
     cfg: CustomProviderConfig,
     http: reqwest::Client,
+    /// Shared credential store: auth.json wins over `api_key_env`.
+    auth_store: Arc<Mutex<AuthStore>>,
 }
 
 impl CustomProvider {
-    pub fn from_config(cfg: CustomProviderConfig) -> Arc<dyn Provider> {
+    pub fn from_config(
+        cfg: CustomProviderConfig,
+        auth_store: Arc<Mutex<AuthStore>>,
+    ) -> Arc<dyn Provider> {
         Arc::new(Self {
             cfg,
             http: reqwest::Client::new(),
+            auth_store,
         })
     }
 
+    /// auth.json → env → `missing_api_key`, resolved per request so a key
+    /// entered in the TUI takes effect without a restart.
+    fn key(&self) -> Result<String> {
+        credentials::require_shared(
+            &self.auth_store,
+            &self.cfg.id,
+            std::slice::from_ref(&self.cfg.api_key_env),
+        )
+    }
+
     fn auth_headers(&self) -> Result<Vec<(String, String)>> {
-        let key = std::env::var(&self.cfg.api_key_env)
-            .map_err(|_| CoreError::MissingApiKey(self.cfg.api_key_env.clone()))?;
+        let key = self.key()?;
         Ok(
             match self.cfg.api_type.unwrap_or(ApiType::OpenAiCompatible) {
                 ApiType::OpenAiCompatible => {
@@ -280,7 +296,10 @@ impl Provider for CustomProvider {
 
 /// Load every valid `*.toml` in `dir` as a provider. Broken files are
 /// reported in the returned error list — one bad file must not kill startup.
-pub fn load_providers_from_dir(dir: &Path) -> (Vec<Arc<dyn Provider>>, Vec<String>) {
+pub fn load_providers_from_dir(
+    dir: &Path,
+    auth_store: Arc<Mutex<AuthStore>>,
+) -> (Vec<Arc<dyn Provider>>, Vec<String>) {
     let mut providers = Vec::new();
     let mut errors = Vec::new();
     let entries = match std::fs::read_dir(dir) {
@@ -298,7 +317,7 @@ pub fn load_providers_from_dir(dir: &Path) -> (Vec<Arc<dyn Provider>>, Vec<Strin
             .map_err(CoreError::Io)
             .and_then(|raw| CustomProviderConfig::parse_toml(&raw))
         {
-            Ok(cfg) => providers.push(CustomProvider::from_config(cfg)),
+            Ok(cfg) => providers.push(CustomProvider::from_config(cfg, Arc::clone(&auth_store))),
             Err(e) => errors.push(format!("{}: {e}", path.display())),
         }
     }
@@ -352,5 +371,40 @@ tool_call = true
         let cfg = CustomProviderConfig::parse_toml(&raw).unwrap();
         assert_eq!(cfg.chat_endpoint(), "https://api.example.com/v1/messages");
         assert_eq!(cfg.api_type, Some(ApiType::AnthropicCompatible));
+    }
+
+    #[tokio::test]
+    async fn stored_credential_is_used_without_env() {
+        use crate::wire_test_util::{one_shot_server, sample_request};
+        use lmhub_core::{ReasoningLevel, StoredCredential};
+
+        let env_key = "LMHUB_TEST_CUSTOM_STORED_ONLY";
+        std::env::remove_var(env_key);
+        let mut store = AuthStore::load(std::env::temp_dir().join("lmhub-test-auth-unused.json"));
+        store.set_credential(
+            "my-provider",
+            StoredCredential::api("sk-custom-stored-1234567890"),
+        );
+        let (base, rx) = one_shot_server(
+            200,
+            "application/json",
+            r#"{"choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}"#
+                .into(),
+        )
+        .await;
+        let cfg = CustomProviderConfig {
+            id: "my-provider".into(),
+            base_url: base,
+            api_key_env: env_key.into(),
+            ..Default::default()
+        };
+        let p = CustomProvider::from_config(cfg, std::sync::Arc::new(std::sync::Mutex::new(store)));
+        let resp = p.chat(&sample_request(ReasoningLevel::Off)).await.unwrap();
+        assert_eq!(resp.text, "hi");
+        let raw = rx.await.unwrap().to_ascii_lowercase();
+        assert!(
+            raw.contains("authorization: bearer sk-custom-stored-1234567890"),
+            "auth.json key must be sent: {raw}"
+        );
     }
 }

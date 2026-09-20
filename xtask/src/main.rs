@@ -37,12 +37,25 @@ async fn gen_providers() -> anyhow::Result<()> {
         anyhow::bail!("catalog root is not an object");
     };
     for (id, entry) in entries {
+        let env: Vec<String> = entry
+            .get("env")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        // Only credential-bearing names: using the raw `env` order made
+        // `AZURE_RESOURCE_NAME` an "API key" (see known::classify_key_envs).
+        let key_envs = lmhub_providers::known::classify_key_envs(id, &env);
         providers.push(serde_json::json!({
             "id": id,
             "name": entry.get("name").and_then(|v| v.as_str()).unwrap_or(id),
             "npm": entry.get("npm").and_then(|v| v.as_str()),
             "api": entry.get("api").and_then(|v| v.as_str()),
-            "env": entry.get("env").cloned().unwrap_or_else(|| serde_json::json!([])),
+            "env": env,
+            "key_envs": key_envs,
         }));
     }
     providers.sort_by_key(|p| p["id"].as_str().unwrap_or("").to_string());

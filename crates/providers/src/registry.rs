@@ -51,8 +51,8 @@ pub fn build_registry(
     auth_store: Arc<Mutex<AuthStore>>,
 ) -> (ProviderRegistry, Vec<String>) {
     let mut items: Vec<Arc<dyn Provider>> = vec![
-        crate::anthropic::NativeAnthropicProvider::standard(),
-        crate::openai::NativeOpenAiProvider::standard(),
+        crate::anthropic::NativeAnthropicProvider::standard(Arc::clone(&auth_store)),
+        crate::openai::NativeOpenAiProvider::standard(Arc::clone(&auth_store)),
     ];
     let mut errors: Vec<String> = Vec::new();
 
@@ -91,7 +91,7 @@ pub fn build_registry(
             resolved.entry.name.clone(),
             resolved.protocol,
             resolved.base_url.clone(),
-            resolved.entry.env.clone(),
+            resolved.key_envs.clone(),
             resolved.entry.id.clone(),
             resolved.requires_key,
             Arc::clone(&auth_store),
@@ -100,7 +100,8 @@ pub fn build_registry(
         items.push(provider);
     }
 
-    let (mut custom, custom_errors) = crate::config::load_providers_from_dir(providers_dir);
+    let (mut custom, custom_errors) =
+        crate::config::load_providers_from_dir(providers_dir, auth_store);
     errors.extend(custom_errors);
 
     // Custom TOMLs win over known entries with the same id.
