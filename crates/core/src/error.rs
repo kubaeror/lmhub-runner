@@ -18,6 +18,11 @@ pub enum CoreError {
     Parse(String),
     #[error("sandbox violation: {0}")]
     Sandbox(String),
+    /// Sandbox infrastructure could not enforce anything for this call (e.g.
+    /// the program does not exist). NOT a policy violation — failed tool
+    /// counts must not be inflated by typos in `argv[0]`.
+    #[error("sandbox unavailable: {0}")]
+    SandboxUnavailable(String),
     #[error("operation timed out")]
     Timeout,
     #[error("operation cancelled")]
@@ -42,6 +47,7 @@ impl CoreError {
             Self::MissingApiKey(_) => "missing_api_key",
             Self::Parse(_) => "response_parsing",
             Self::Sandbox(_) => "sandbox_violation",
+            Self::SandboxUnavailable(_) => "sandbox_unavailable",
             Self::Timeout => "timeout",
             Self::Cancelled => "cancelled",
             Self::LimitExceeded(_) => "limit_exceeded",

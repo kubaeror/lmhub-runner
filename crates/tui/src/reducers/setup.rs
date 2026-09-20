@@ -29,11 +29,6 @@ impl State {
                 Pane::Task => self.move_task_prompt(delta),
                 _ => Vec::new(),
             },
-            Action::SearchProviders(text) => {
-                self.setup.provider_filter.set(text);
-                self.clamp_provider_idx();
-                Vec::new()
-            }
             Action::ClearSearch => {
                 self.setup.provider_filter.clear();
                 self.clamp_provider_idx();
@@ -166,7 +161,7 @@ impl State {
 
     // ---- provider selection / search --------------------------------------
 
-    fn clamp_provider_idx(&mut self) {
+    pub(crate) fn clamp_provider_idx(&mut self) {
         let count = self
             .provider_rows()
             .into_iter()
@@ -250,10 +245,10 @@ impl State {
             return Vec::new();
         };
         let id = provider.id().to_string();
-        if id == "github-copilot" {
+        if provider.supports_device_flow() {
             // Device flow is long-running: defer to an effect; progress and
             // the final outcome come back as `UiMsg::Notice`.
-            self.push_notice("copilot: starting device flow…");
+            self.push_notice(format!("{id}: starting device flow…"));
             vec![Effect::RunCopilotFlow]
         } else {
             self.modal = Some(Modal::EnterKey {
@@ -477,6 +472,7 @@ impl State {
             task: task.clone(),
             status,
             started: Instant::now(),
+            finished_at: None,
             cancel: Some(cancel.clone()),
             transcript: Transcript::default(),
             tokens: Default::default(),

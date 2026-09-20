@@ -60,11 +60,14 @@ fn resolve_binary(program: &str, allowed: &[String]) -> Result<PathBuf> {
                 return candidate
                     .canonicalize()
                     .map_err(CoreError::Io)
-                    .map_err(|e| CoreError::Sandbox(format!("cannot resolve binary: {e}")));
+                    .map_err(|e| {
+                        CoreError::SandboxUnavailable(format!("cannot resolve binary: {e}"))
+                    });
             }
         }
     }
-    Err(CoreError::Sandbox(format!(
+    // Allowlisted but absent: infrastructure problem, not a policy violation.
+    Err(CoreError::SandboxUnavailable(format!(
         "allowlisted command {program:?} not found on this machine"
     )))
 }
@@ -231,9 +234,11 @@ pub async fn run_allowlisted(
     }
 
     let started = Instant::now();
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| CoreError::Sandbox(format!("failed to spawn {:?}: {e}", program)))?;
+    let mut child = cmd.spawn().map_err(|e| {
+        // A missing/permission-denied program is an infrastructure failure,
+        // not a sandbox-policy violation: don't inflate violation counts.
+        CoreError::SandboxUnavailable(format!("failed to spawn {:?}: {e}", program))
+    })?;
 
     let pid = child.id().unwrap_or(0);
     // While armed, dropping this guard SIGKILLs the whole process group
@@ -594,6 +599,30 @@ mod tests {
             matches!(err.unwrap_err(), CoreError::Sandbox(_)),
             "must be a sandbox violation"
         );
+    }
+
+    #[tokio::test]
+    async fn missing_binary_is_unavailable_not_a_violation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let program = "definitely-not-installed-lmhub-xyz";
+        let err = run_allowlisted(
+            &[program.to_string()],
+            &[program.to_string()],
+            tmp.path(),
+            tmp.path(),
+            &tmp.path().join("t"),
+            &tmp.path().join("h"),
+            Duration::from_secs(5),
+            "x1b",
+            &SandboxRuntime::Legacy,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, CoreError::SandboxUnavailable(_)),
+            "missing binary must not be a policy violation: {err:?}"
+        );
+        assert_eq!(err.kind(), "sandbox_unavailable");
     }
 
     #[tokio::test]

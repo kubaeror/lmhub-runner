@@ -13,13 +13,22 @@ fn lock() -> MutexGuard<'static, Vec<String>> {
     SECRETS.lock().expect("redact secrets mutex poisoned")
 }
 
+/// Minimum secret length registered for scrubbing. Short values would match
+/// too much ordinary text; the same rule is documented in the README.
+pub const MIN_SECRET_LEN: usize = 8;
+
 pub fn init() {
-    let mut values: Vec<String> = std::env::vars()
-        .filter(|(k, v)| {
-            let ku = k.to_ascii_uppercase();
-            SENSITIVE_MARKERS.iter().any(|m| ku.contains(m)) && v.len() >= 8
+    // vars_os + lossy conversion: a non-UTF-8 env value must not panic the
+    // runner (std::env::vars would).
+    let mut values: Vec<String> = std::env::vars_os()
+        .filter_map(|(k, v)| {
+            let ku = k.to_string_lossy().to_ascii_uppercase();
+            if !SENSITIVE_MARKERS.iter().any(|m| ku.contains(m)) {
+                return None;
+            }
+            let value = v.to_string_lossy().into_owned();
+            (value.len() >= MIN_SECRET_LEN).then_some(value)
         })
-        .map(|(_, v)| v)
         .collect();
     values.extend(lock().iter().cloned());
     values.sort_by_key(|v| std::cmp::Reverse(v.len()));
@@ -30,7 +39,7 @@ pub fn init() {
 /// Register an additional secret value (auth.json entries, oauth tokens).
 /// Safe to call before or after `init`; both paths are covered.
 pub fn register_extra(value: &str) {
-    if value.len() < 8 {
+    if value.len() < MIN_SECRET_LEN {
         return;
     }
     let mut secrets = lock();
@@ -78,5 +87,20 @@ mod tests {
         super::init();
         let s = super::scrub("early-secret-value-789 in an error");
         assert!(s.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn short_values_are_not_registered() {
+        super::init();
+        super::register_extra("1234567");
+        assert_eq!(
+            super::scrub("prefix-1234567-suffix"),
+            "prefix-1234567-suffix"
+        );
+        super::register_extra("12345678");
+        assert_eq!(
+            super::scrub("prefix-12345678-suffix"),
+            "prefix-[REDACTED]-suffix"
+        );
     }
 }

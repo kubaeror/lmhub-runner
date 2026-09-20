@@ -71,6 +71,8 @@ pub struct CustomProviderConfig {
     pub supports_reasoning: bool,
     pub supports_prompt_caching: bool,
     pub models_dev_provider: Option<String>,
+    /// Explicit opt-in for plain-`http://` base URLs on non-local hosts.
+    pub allow_insecure: bool,
     #[serde(default)]
     pub models: Vec<LocalModel>,
 }
@@ -89,6 +91,7 @@ impl Default for CustomProviderConfig {
             supports_reasoning: false,
             supports_prompt_caching: false,
             models_dev_provider: None,
+            allow_insecure: false,
             models: Vec::new(),
         }
     }
@@ -119,6 +122,16 @@ impl CustomProviderConfig {
             return Err(CoreError::Other(
                 "provider `base_url` must start with http(s)://".into(),
             ));
+        }
+        if self.base_url.starts_with("http://")
+            && !is_local_http_host(&self.base_url)
+            && !self.allow_insecure
+        {
+            return Err(CoreError::Other(format!(
+                "provider `{}` uses a plain-http base_url for a non-local host; \
+                 use https:// or set allow_insecure = true explicitly",
+                self.id
+            )));
         }
         if self.api_key_env.is_empty() {
             return Err(CoreError::Other(
@@ -153,6 +166,21 @@ impl CustomProviderConfig {
                 .trim_start_matches('/')
         )
     }
+}
+
+/// True when a plain-http base URL points at the local machine (allowed
+/// without `allow_insecure` — local runtimes like Ollama/LM Studio).
+fn is_local_http_host(base_url: &str) -> bool {
+    let host_port = base_url
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or("");
+    let host = host_port.split(':').next().unwrap_or("");
+    matches!(
+        host,
+        "localhost" | "127.0.0.1" | "0.0.0.0" | "[::1]" | "::1"
+    )
 }
 
 /// Config-driven provider speaking either the OpenAI-compatible or the
@@ -270,27 +298,45 @@ impl Provider for CustomProvider {
     }
 
     async fn chat(&self, request: &ChatRequest) -> Result<ChatResponse> {
-        match self.cfg.api_type.unwrap_or(ApiType::OpenAiCompatible) {
+        // Honour the declared capabilities: never send tools or cache
+        // controls the config says are unsupported.
+        let mut warnings: Vec<String> = Vec::new();
+        let mut effective = request.clone();
+        if !self.cfg.supports_prompt_caching {
+            effective.enable_prompt_cache = false;
+        }
+        if !self.cfg.supports_tool_calls && !effective.tools.is_empty() {
+            effective.tools.clear();
+            warnings.push(format!(
+                "provider `{}` declares no tool support; tools stripped",
+                self.cfg.id
+            ));
+        }
+        let mut resp = match self.cfg.api_type.unwrap_or(ApiType::OpenAiCompatible) {
             ApiType::OpenAiCompatible => {
                 // Reasoning param only when configured as supported.
                 let payload = wire_openai::build_chat_payload(
-                    request,
+                    &effective,
                     OpenAiWireOpts {
                         include_reasoning_effort: self.cfg.supports_reasoning,
                     },
                 );
-                self.post_chat(&payload).await
+                self.post_chat(&payload).await?
             }
             ApiType::AnthropicCompatible => {
                 let payload = wire_anthropic::build_chat_payload(
-                    request,
+                    &effective,
                     AnthropicWireOpts {
                         supports_thinking: self.cfg.supports_reasoning,
                     },
                 );
-                self.post_chat(&payload).await
+                self.post_chat(&payload).await?
             }
-        }
+        };
+        let mut all = warnings;
+        all.append(&mut resp.warnings);
+        resp.warnings = all;
+        Ok(resp)
     }
 }
 
@@ -363,6 +409,71 @@ tool_call = true
     fn rejects_bad_base_url() {
         let raw = SAMPLE.replace("https://api.example.com/v1", "not-a-url");
         assert!(CustomProviderConfig::parse_toml(&raw).is_err());
+    }
+
+    #[test]
+    fn plain_http_requires_localhost_or_opt_in() {
+        // Local runtimes (Ollama & co) keep working over http.
+        let local = SAMPLE.replace("https://api.example.com/v1", "http://localhost:11434/v1");
+        assert!(CustomProviderConfig::parse_toml(&local).is_ok());
+        let loopback = SAMPLE.replace("https://api.example.com/v1", "http://127.0.0.1:8080/v1");
+        assert!(CustomProviderConfig::parse_toml(&loopback).is_ok());
+
+        // Remote plain-http is refused...
+        let remote = SAMPLE.replace("https://api.example.com/v1", "http://api.example.com/v1");
+        let err = CustomProviderConfig::parse_toml(&remote).unwrap_err();
+        assert!(err.to_string().contains("allow_insecure"), "{err}");
+
+        // ...unless explicitly opted in.
+        let opted_in = remote.replace(
+            "supports_tool_calls = true",
+            "supports_tool_calls = true\nallow_insecure = true",
+        );
+        assert!(CustomProviderConfig::parse_toml(&opted_in).is_ok());
+    }
+
+    #[tokio::test]
+    async fn tool_and_cache_capabilities_are_enforced() {
+        use crate::wire_test_util::{one_shot_server, sample_request};
+        let (base, rx) = one_shot_server(
+            200,
+            "application/json",
+            r#"{"choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}"#
+                .to_string(),
+        )
+        .await;
+        let cfg = CustomProviderConfig {
+            id: "my-provider".into(),
+            base_url: base,
+            api_key_env: "LMHUB_TEST_CUSTOM_CAPS".into(),
+            supports_tool_calls: false,
+            supports_prompt_caching: false,
+            ..Default::default()
+        };
+        let mut store = AuthStore::load(std::env::temp_dir().join("lmhub-test-auth-caps.json"));
+        store.set_credential(
+            "my-provider",
+            lmhub_core::StoredCredential::api("sk-custom-caps-1234567890"),
+        );
+        let store = std::sync::Arc::new(std::sync::Mutex::new(store));
+        let provider = CustomProvider::from_config(cfg, store);
+        let mut req = sample_request(lmhub_core::ReasoningLevel::Off);
+        req.enable_prompt_cache = true; // must be turned off
+        let resp = provider.chat(&req).await.unwrap();
+        assert!(
+            resp.warnings.iter().any(|w| w.contains("tool")),
+            "{:?}",
+            resp.warnings
+        );
+        let raw_request = rx.await.unwrap();
+        assert!(
+            !raw_request.contains("\"tools\""),
+            "tools must be stripped: {raw_request}"
+        );
+        assert!(
+            !raw_request.contains("cache_control"),
+            "cache control must not be sent: {raw_request}"
+        );
     }
 
     #[test]

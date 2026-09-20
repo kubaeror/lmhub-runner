@@ -54,9 +54,7 @@ fn draw_sessions(f: &mut Frame, state: &State, area: Rect, info: &mut RenderInfo
             };
             let (status_color, status) = match r.status {
                 RunSessionStatus::Pending => (Color::Yellow, "queued".to_string()),
-                RunSessionStatus::Running => {
-                    (Color::Cyan, format!("{}s", r.started.elapsed().as_secs()))
-                }
+                RunSessionStatus::Running => (Color::Cyan, format!("{}s", r.elapsed().as_secs())),
                 RunSessionStatus::Finished => (
                     if r.finished_line
                         .as_deref()
@@ -252,7 +250,7 @@ fn draw_stats(f: &mut Frame, state: &State, area: Rect) {
                 run.provider_id,
                 run.model_id,
                 run.reasoning,
-                run.started.elapsed().as_secs(),
+                run.elapsed().as_secs(),
                 u.input_tokens,
                 u.output_tokens,
                 hit,

@@ -1534,6 +1534,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn missing_binary_is_not_counted_as_a_sandbox_violation() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = "definitely-not-installed-lmhub-xyz";
+        let rt = ToolRuntime::create(
+            &dir.path().join("ws"),
+            SandboxConfig {
+                allowed_commands: vec![missing.into()],
+                command_timeout: Duration::from_secs(5),
+                read_file_max_bytes: 1024,
+                write_file_max_bytes: 1024,
+                runtime: crate::runtime::SandboxRuntime::Legacy,
+                allow_legacy_commands: true,
+            },
+        )
+        .unwrap();
+        let out = rt.execute("run_command", &json!({"argv": [missing]})).await;
+        assert!(!out.success);
+        assert!(
+            !out.sandbox_violation,
+            "a missing binary must not inflate violation counts: {}",
+            out.summary
+        );
+        assert_eq!(out.metadata.get("blocked"), None);
+        assert!(
+            out.summary.contains("run_command failed"),
+            "{}",
+            out.summary
+        );
+    }
+
+    #[tokio::test]
     async fn read_file_paging_skips_lines_before_truncation() {
         let (_dir, rt) = runtime();
         let content = (0..100)

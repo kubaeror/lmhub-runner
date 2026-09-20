@@ -349,6 +349,8 @@ enum BlockAcc {
     Tool {
         id: String,
         name: String,
+        /// `input` from `content_block_start` when the server sends it there.
+        initial: Value,
         json: String,
     },
     /// A block the accumulator does not interpret (e.g. `redacted_thinking`):
@@ -411,6 +413,9 @@ impl AnthropicStreamAccumulator {
                             .and_then(|v| v.as_str())
                             .unwrap_or_default()
                             .into(),
+                        // Some servers send the complete `input` in the start
+                        // event (no input_json_delta follows).
+                        initial: block.get("input").cloned().unwrap_or(Value::Null),
                         json: String::new(),
                     },
                     // redacted_thinking (and any future block type): keep it
@@ -532,8 +537,19 @@ impl AnthropicStreamAccumulator {
                     }));
                     thinking_parts.push(thinking.clone());
                 }
-                Some(BlockAcc::Tool { id, name, json }) => {
-                    let arguments: Value = serde_json::from_str(json).unwrap_or_else(|_| json!({}));
+                Some(BlockAcc::Tool {
+                    id,
+                    name,
+                    initial,
+                    json,
+                }) => {
+                    let arguments: Value = if !json.trim().is_empty() {
+                        serde_json::from_str(json).unwrap_or_else(|_| json!({}))
+                    } else if initial.as_object().is_some_and(|o| !o.is_empty()) {
+                        initial.clone()
+                    } else {
+                        json!({})
+                    };
                     raw_blocks.push(json!({
                         "type": "tool_use",
                         "id": id,
@@ -733,6 +749,26 @@ mod stream_tests {
     fn empty_stream_is_parse_error() {
         let err = AnthropicStreamAccumulator::new().finish(1).unwrap_err();
         assert!(matches!(err, CoreError::Parse(_)), "{err:?}");
+    }
+
+    #[test]
+    fn tool_use_input_from_start_event_is_kept() {
+        // Some servers send the complete input in `content_block_start` with
+        // no `input_json_delta` following.
+        let mut acc = AnthropicStreamAccumulator::new();
+        let _ = acc.feed(
+            Some("content_block_start"),
+            &json!({"index": 0, "content_block": {"type": "tool_use", "id": "tu1",
+                                                   "name": "read_file",
+                                                   "input": {"path": "a.txt"}}}),
+        );
+        let _ = acc.feed(
+            Some("message_delta"),
+            &json!({"delta": {"stop_reason": "tool_use"}}),
+        );
+        let resp = acc.finish(3).unwrap();
+        assert_eq!(resp.tool_calls[0].name, "read_file");
+        assert_eq!(resp.tool_calls[0].arguments["path"], json!("a.txt"));
     }
 
     #[test]

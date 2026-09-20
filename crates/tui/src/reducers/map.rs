@@ -9,11 +9,6 @@ impl State {
     /// Fold an action owned by the reasoning-map reducer.
     pub(crate) fn reduce_map(&mut self, action: Action) -> Vec<Effect> {
         match action {
-            Action::MapFilter(text) => {
-                self.map.filter.set(text);
-                self.map.idx = self.map.idx.min(self.map_rows().len().saturating_sub(1));
-                Vec::new()
-            }
             Action::MapClear => {
                 self.map.filter.clear();
                 self.map.idx = 0;
@@ -77,7 +72,16 @@ impl State {
         let current = self.prefs.model_defaults.get(&model.model_id).copied();
         let next = match current.and_then(|c| levels.iter().position(|l| *l == c)) {
             Some(idx) => levels[(idx + 1) % levels.len()],
-            None => levels[1], // first real level (skip "off")
+            // No pinned default: continue from the user's current level when
+            // the model supports it, else start at the first supported one
+            // (never a blind `levels[1]`).
+            None => match levels.iter().position(|l| *l == self.setup.reasoning) {
+                Some(idx) => levels[(idx + 1) % levels.len()],
+                None => levels
+                    .first()
+                    .copied()
+                    .unwrap_or(lmhub_core::ReasoningLevel::Off),
+            },
         };
         self.prefs
             .model_defaults

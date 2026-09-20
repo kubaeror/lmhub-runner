@@ -377,8 +377,21 @@ fn run_effects(state: &mut State, effects: Vec<Effect>) {
                 let opener = "open";
                 #[cfg(not(target_os = "macos"))]
                 let opener = "xdg-open";
-                match std::process::Command::new(opener).arg(&dir).spawn() {
-                    Ok(_) => state.push_notice(format!("opened {}", dir.display())),
+                // Detached child, no inherited stdio, reaped off-thread so
+                // the UI never blocks on the opener.
+                match std::process::Command::new(opener)
+                    .arg(&dir)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                {
+                    Ok(mut child) => {
+                        state.push_notice(format!("opened {}", dir.display()));
+                        std::thread::spawn(move || {
+                            let _ = child.wait();
+                        });
+                    }
                     Err(e) => state.push_notice(format!("✖ could not open {}: {e}", dir.display())),
                 }
             }

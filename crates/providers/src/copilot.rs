@@ -15,9 +15,20 @@ use std::time::Duration;
 
 pub const DEFAULT_CLIENT_ID: &str = "Iv1.b507a08c87ecfe98"; // opencode's public client id
 pub const PROVIDER_ID: &str = "github-copilot";
+/// Sent as `editor-version` / `editor-plugin-version` on Copilot requests.
+pub const DEFAULT_EDITOR_VERSION: &str = "vscode/1.95.0";
+pub const EDITOR_PLUGIN_VERSION: &str = "copilot/1.0";
+/// Identifies the client to Copilot (VS Code chat integration).
+pub const INTEGRATION_ID: &str = "vscode-chat";
 
 fn client_id() -> String {
     std::env::var("LMHUB_GITHUB_CLIENT_ID").unwrap_or_else(|_| DEFAULT_CLIENT_ID.into())
+}
+
+/// Copilot editor version; overridable via `LMHUB_COPILOT_EDITOR_VERSION`
+/// when GitHub demands a newer client string.
+pub fn editor_version() -> String {
+    std::env::var("LMHUB_COPILOT_EDITOR_VERSION").unwrap_or_else(|_| DEFAULT_EDITOR_VERSION.into())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -218,8 +229,9 @@ pub async fn copilot_token(github_token: &str) -> Result<(String, i64)> {
         .get("https://api.github.com/copilot_internal/v2/token")
         .bearer_auth(github_token)
         .header("user-agent", "lmhub-runner")
-        .header("editor-version", "vscode/1.95.0")
-        .header("editor-plugin-version", "copilot/1.0")
+        .header("editor-version", editor_version())
+        .header("editor-plugin-version", EDITOR_PLUGIN_VERSION)
+        .header("copilot-integration-id", INTEGRATION_ID)
         .timeout(Duration::from_secs(30))
         .send()
         .await

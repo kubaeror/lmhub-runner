@@ -398,7 +398,13 @@ fn map_finish_reason(raw: &str) -> StopReason {
         "tool_calls" | "function_call" => StopReason::ToolUse,
         "length" | "max_tokens" => StopReason::Length,
         "content_filter" => StopReason::Refusal,
-        _ => StopReason::Other,
+        other => {
+            tracing::debug!(
+                finish_reason = other,
+                "unmapped OpenAI finish_reason (recorded as Other)"
+            );
+            StopReason::Other
+        }
     }
 }
 

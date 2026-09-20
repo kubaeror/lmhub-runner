@@ -319,7 +319,8 @@ fn strip_chat_suffix(url: &str) -> String {
 }
 
 /// Replace every `${VAR}` in `url` with its environment value. Returns the
-/// names of any variables that are not set.
+/// names of any variables that are not set (or whose value is unsafe to
+/// interpolate).
 fn interpolate_env(url: &str) -> std::result::Result<String, Vec<String>> {
     let mut missing = Vec::new();
     let mut out = String::new();
@@ -333,9 +334,14 @@ fn interpolate_env(url: &str) -> std::result::Result<String, Vec<String>> {
             break;
         };
         let var = &after[..end];
-        match std::env::var(var) {
-            Ok(value) => out.push_str(&value),
-            Err(_) => {
+        match std::env::var(var)
+            .ok()
+            .and_then(|v| sanitize_base_url_component(&v))
+        {
+            Some(value) => out.push_str(&value),
+            None => {
+                // Unset *or* unsafe to embed — fail closed: the caller drops
+                // the URL instead of building a surprising one.
                 missing.push(var.to_string());
                 out.push_str(&rest[start..start + 2 + end + 1]);
             }
@@ -348,6 +354,20 @@ fn interpolate_env(url: &str) -> std::result::Result<String, Vec<String>> {
     } else {
         Err(missing)
     }
+}
+
+/// Reject env values that would change the URL's meaning when embedded
+/// (path traversal, userinfo, spaces, embedded scheme/authority).
+fn sanitize_base_url_component(value: &str) -> Option<String> {
+    let unsafe_value = value.is_empty()
+        || value.chars().any(|c| c.is_whitespace() || c.is_control())
+        || value.contains("..")
+        || value.contains('@')
+        || value.contains('\\')
+        || value.contains("//")
+        || value.contains('?')
+        || value.contains('#');
+    (!unsafe_value).then(|| value.to_string())
 }
 
 /// Every known provider resolved and ready for registry insertion.
@@ -520,6 +540,46 @@ mod tests {
         };
         let r = resolve_entry(&e);
         assert!(r.base_url.is_none());
+    }
+
+    #[test]
+    fn env_template_rejects_url_metacharacters() {
+        for (var, value) in [
+            ("LMHUB_TEST_BAD_TRAVERSAL", ".."),
+            ("LMHUB_TEST_BAD_USERINFO", "user@evil.example"),
+            ("LMHUB_TEST_BAD_SPACE", "a b"),
+            ("LMHUB_TEST_BAD_SCHEME", "evil.example//"),
+        ] {
+            std::env::set_var(var, value);
+            let e = KnownEntry {
+                id: "t4".into(),
+                name: "T4".into(),
+                npm: Some("@ai-sdk/openai-compatible".into()),
+                api: Some(format!("https://api.example.com/${{{var}}}/v1")),
+                env: vec![var.into()],
+                key_envs: vec![],
+            };
+            let r = resolve_entry(&e);
+            assert!(
+                r.base_url.is_none(),
+                "{var}={value:?} must fail closed, got {:?}",
+                r.base_url
+            );
+        }
+        // A safe value still interpolates.
+        std::env::set_var("LMHUB_TEST_GOOD_ACCOUNT", "acct-123.4");
+        let e = KnownEntry {
+            id: "t5".into(),
+            name: "T5".into(),
+            npm: Some("@ai-sdk/openai-compatible".into()),
+            api: Some("https://api.example.com/${LMHUB_TEST_GOOD_ACCOUNT}/v1".into()),
+            env: vec!["LMHUB_TEST_GOOD_ACCOUNT".into()],
+            key_envs: vec![],
+        };
+        assert_eq!(
+            resolve_entry(&e).base_url.as_deref(),
+            Some("https://api.example.com/acct-123.4/v1")
+        );
     }
 
     #[test]

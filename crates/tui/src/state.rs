@@ -115,6 +115,9 @@ pub struct RunSession {
     pub task: String,
     pub status: RunSessionStatus,
     pub started: Instant,
+    /// When the run reached a terminal state; elapsed time is frozen here
+    /// (instead of counting up forever on the Run screen).
+    pub finished_at: Option<Instant>,
     pub cancel: Option<CancellationToken>,
     pub transcript: Transcript,
     pub tokens: Usage,
@@ -142,6 +145,15 @@ pub struct RunRegistry {
     pub runs: Vec<RunSession>,
     pub selected: usize,
     pub next_id: u64,
+}
+
+impl RunSession {
+    /// Elapsed wall time, frozen once the run reached a terminal state.
+    pub fn elapsed(&self) -> std::time::Duration {
+        self.finished_at
+            .unwrap_or_else(Instant::now)
+            .saturating_duration_since(self.started)
+    }
 }
 
 impl RunRegistry {

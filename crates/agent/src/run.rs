@@ -326,7 +326,16 @@ async fn run_loop(
     reasoning: ReasoningLevel,
 ) -> Result<LoopExit, CoreError> {
     let mut messages: Vec<ChatMessage> = vec![ChatMessage::user(spec.task.clone())];
-    let tools = tool_specs();
+    let mut tools = tool_specs();
+    // Models that declare no tool support get a single plain-text turn
+    // instead of a doomed request (mirrors the adapter-level degradation).
+    if !spec.model.capabilities.tool_call && !tools.is_empty() {
+        tools.clear();
+        sink.warning(&format!(
+            "model {} declares no tool support; running without tools (single turn)",
+            spec.model.id
+        ));
+    }
 
     // Context budget: models.dev window (when known) minus the output
     // reserve; the operator may cap history further in config.
@@ -411,6 +420,15 @@ async fn run_loop(
             sink.warning(warning);
         }
 
+        // A turn cut off by the output cap is not a normal completion: warn
+        // and carry an explicit truncation note into history.
+        if response.stop_reason == lmhub_core::StopReason::Length {
+            sink.warning(&format!(
+                "turn {turn}: response stopped at max_tokens ({}); the answer may be truncated",
+                spec.max_output_tokens
+            ));
+        }
+
         let used_cache = response.usage.cache_read_tokens.unwrap_or(0) > 0
             || response.usage.cache_write_tokens.unwrap_or(0) > 0;
         metrics.record_usage(&response.usage);
@@ -429,8 +447,12 @@ async fn run_loop(
 
         // Assistant turn goes into history *before* tool execution; raw
         // blocks (thinking signatures etc.) round-trip via provider_state.
+        let mut assistant_text = response.text.clone();
+        if response.stop_reason == lmhub_core::StopReason::Length && !assistant_text.is_empty() {
+            assistant_text.push_str("\n[response truncated at max_tokens]");
+        }
         messages.push(ChatMessage::assistant_with_tool_calls(
-            response.text.clone(),
+            assistant_text,
             response.tool_calls.clone(),
             response.raw_assistant_message.clone(),
         ));

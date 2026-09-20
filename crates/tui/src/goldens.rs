@@ -178,6 +178,7 @@ fn session(id: u64, model_id: &str, status: RunSessionStatus, state: &State) -> 
         task: "refactor the codebase".into(),
         status,
         started: Instant::now(),
+        finished_at: None,
         cancel: None,
         transcript: Transcript::default(),
         tokens: Default::default(),

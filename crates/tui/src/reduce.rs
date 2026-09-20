@@ -34,13 +34,13 @@ impl State {
             | Action::PaletteBackspace
             | Action::PaletteMove(_)
             | Action::PaletteEnter
-            | Action::PaletteRunAction(_) => self.reduce_global(action),
+            | Action::PaletteRunAction(_)
+            | Action::FilterEdit(_, _) => self.reduce_global(action),
 
             // ---- setup ------------------------------------------------------
             Action::CycleFocus(_)
             | Action::FocusPane(_)
             | Action::MoveSelection(_)
-            | Action::SearchProviders(_)
             | Action::ClearSearch
             | Action::ToggleFavorite
             | Action::ConnectProvider
@@ -79,8 +79,7 @@ impl State {
             }
 
             // ---- reasoning map ------------------------------------------------
-            Action::MapFilter(_)
-            | Action::MapClear
+            Action::MapClear
             | Action::MapMove(_)
             | Action::CycleModelDefault
             | Action::SetModelDefault
@@ -181,6 +180,7 @@ mod tests {
             task: "t".into(),
             status: RunSessionStatus::Running,
             started: Instant::now(),
+            finished_at: None,
             cancel: Some(CancellationToken::new()),
             transcript: Transcript::default(),
             tokens: Default::default(),
@@ -378,7 +378,12 @@ mod tests {
     #[test]
     fn search_ranks_and_filters() {
         let (mut state, _dir) = crate::testutil::test_state();
-        state.reduce(Action::SearchProviders("groq".into()));
+        for c in "groq".chars() {
+            state.reduce(Action::FilterEdit(
+                crate::action::FilterTarget::Providers,
+                crate::action::FilterEdit::Insert(c),
+            ));
+        }
         let rows = state.provider_rows();
         assert!(!rows.is_empty());
         assert!(rows.iter().all(|r| r.group.is_none()), "search is flat");
@@ -705,5 +710,35 @@ mod tests {
         // No default → chosen level (off by default); default set → low.
         assert_eq!(by_model["gpt-4o"], "off");
         assert_eq!(by_model["gpt-4o-mini"], "low");
+    }
+
+    #[test]
+    fn palette_cursor_stays_within_the_filtered_list() {
+        let (mut state, _dir) = crate::testutil::test_state();
+        state.modal = Some(Modal::Palette {
+            filter: "run".into(),
+            cursor: 0,
+        });
+        state.reduce(Action::PaletteMove(1));
+        let Some(Modal::Palette { cursor, .. }) = &state.modal else {
+            panic!("palette closed");
+        };
+        let len = state.filtered_palette("run").len();
+        assert!(len > 0 && *cursor < len, "cursor {cursor} vs len {len}");
+
+        // A filter that matches nothing clamps the cursor and Enter is a
+        // no-op with a notice (the modal stays open).
+        for c in "zzz".chars() {
+            state.reduce(Action::PaletteChar(c));
+        }
+        let Some(Modal::Palette { filter, cursor }) = &state.modal else {
+            panic!("palette closed");
+        };
+        assert!(state.filtered_palette(filter.as_str()).is_empty());
+        assert_eq!(*cursor, 0);
+        let effects = state.reduce(Action::PaletteEnter);
+        assert!(effects.is_empty());
+        assert!(state.modal.is_some(), "empty-list Enter must not execute");
+        assert!(state.notice.is_some());
     }
 }

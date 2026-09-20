@@ -99,6 +99,12 @@ pub trait Provider: Send + Sync {
         false
     }
 
+    /// Whether connecting this provider requires the GitHub device flow
+    /// (Copilot-style OAuth) rather than an API-key entry.
+    fn supports_device_flow(&self) -> bool {
+        false
+    }
+
     fn caps(&self) -> ProviderCaps;
 
     /// Query the provider's own `/models`-style endpoint.

@@ -69,6 +69,10 @@ impl State {
                 self.push_notice(msg);
                 Vec::new()
             }
+            Action::FilterEdit(target, edit) => {
+                self.apply_filter_edit(target, edit);
+                Vec::new()
+            }
             Action::Paste(text) => self.paste_text(text),
             Action::UiMsg(msg) => self.reduce_ui_msg(msg),
 
@@ -80,24 +84,65 @@ impl State {
                 if let Some(Modal::Palette { filter, .. }) = &mut self.modal {
                     filter.insert(c);
                 }
+                self.clamp_palette_cursor();
                 Vec::new()
             }
             Action::PaletteBackspace => {
                 if let Some(Modal::Palette { filter, .. }) = &mut self.modal {
                     filter.backspace();
                 }
+                self.clamp_palette_cursor();
                 Vec::new()
             }
             Action::PaletteMove(delta) => {
-                let len = self.palette_commands().len().max(1);
+                // Cycle within the *filtered* list, not the full command set.
+                let len = {
+                    let Some(Modal::Palette { filter, .. }) = &self.modal else {
+                        return Vec::new();
+                    };
+                    self.filtered_palette(filter.as_str()).len()
+                };
                 if let Some(Modal::Palette { cursor, .. }) = &mut self.modal {
-                    *cursor = (*cursor as i32 + delta).rem_euclid(len as i32) as usize;
+                    if len == 0 {
+                        *cursor = 0;
+                    } else {
+                        *cursor = (*cursor as i32 + delta).rem_euclid(len as i32) as usize;
+                    }
                 }
                 Vec::new()
             }
             Action::PaletteEnter => self.palette_enter(),
             Action::PaletteRunAction(idx) => self.palette_run(idx),
             _ => Vec::new(),
+        }
+    }
+
+    /// Apply a cursor-aware edit to an inline filter, then re-clamp whatever
+    /// the filter narrows (provider row cursor / map row cursor).
+    fn apply_filter_edit(
+        &mut self,
+        target: crate::action::FilterTarget,
+        edit: crate::action::FilterEdit,
+    ) {
+        use crate::action::{FilterEdit as E, FilterTarget as T};
+        let field = match target {
+            T::Providers => &mut self.setup.provider_filter,
+            T::ReasoningMap => &mut self.map.filter,
+        };
+        match edit {
+            E::Insert(c) => field.insert(c),
+            E::Backspace => field.backspace(),
+            E::Delete => field.delete(),
+            E::Left => field.move_cursor(-1),
+            E::Right => field.move_cursor(1),
+            E::Home => field.move_home(),
+            E::End => field.move_end(),
+        }
+        match target {
+            T::Providers => self.clamp_provider_idx(),
+            T::ReasoningMap => {
+                self.map.idx = self.map.idx.min(self.map_rows().len().saturating_sub(1));
+            }
         }
     }
 
@@ -211,6 +256,7 @@ impl State {
                 let mut failure_notice = None;
                 if let Some(run) = self.runs.find_mut(run_id) {
                     run.status = RunSessionStatus::Finished;
+                    run.finished_at = Some(Instant::now());
                     run.finished_line = Some(match &result {
                         Ok(outcome) => {
                             let s = &outcome.stats;
@@ -378,19 +424,40 @@ impl State {
     }
 
     fn palette_enter(&mut self) -> Vec<Effect> {
-        let Some(Modal::Palette { filter, cursor }) = &self.modal else {
+        let commands = {
+            let Some(Modal::Palette { filter, .. }) = &self.modal else {
+                return Vec::new();
+            };
+            self.filtered_palette(filter.as_str())
+        };
+        if commands.is_empty() {
+            self.push_notice("no matching command");
+            return Vec::new();
+        }
+        let Some(Modal::Palette { cursor, .. }) = &self.modal else {
             return Vec::new();
         };
-        let (cmd, _, enabled) = match self.filtered_palette(filter.as_str()).get(*cursor) {
-            Some(c) => c.clone(),
-            None => return Vec::new(),
-        };
+        let idx = (*cursor).min(commands.len() - 1);
+        let (cmd, _, enabled) = commands[idx].clone();
         if !enabled {
             self.push_notice("that command is not available right now");
             return Vec::new();
         }
         self.modal = None;
         self.run_palette_cmd(cmd)
+    }
+
+    /// Keep the palette cursor inside the current filtered result set.
+    fn clamp_palette_cursor(&mut self) {
+        let len = {
+            let Some(Modal::Palette { filter, .. }) = &self.modal else {
+                return;
+            };
+            self.filtered_palette(filter.as_str()).len()
+        };
+        if let Some(Modal::Palette { cursor, .. }) = &mut self.modal {
+            *cursor = (*cursor).min(len.saturating_sub(1));
+        }
     }
 
     fn palette_run(&mut self, idx: usize) -> Vec<Effect> {

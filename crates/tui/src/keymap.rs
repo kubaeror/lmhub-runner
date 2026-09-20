@@ -2,7 +2,7 @@
 //! modal and screen. A single table per context — adding a binding touches
 //! exactly one place.
 
-use crate::action::Action;
+use crate::action::{Action, FilterEdit, FilterTarget};
 use crate::state::{Modal, Pane, State};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
@@ -39,7 +39,7 @@ pub fn dispatch(state: &State, key: KeyEvent) -> Option<Action> {
         crate::action::Screen::Setup => setup_keys(state, key),
         crate::action::Screen::Run => run_keys(key),
         crate::action::Screen::History => history_keys(key),
-        crate::action::Screen::Reasoning => reasoning_map_keys(state, key),
+        crate::action::Screen::Reasoning => reasoning_map_keys(key),
     }
 }
 
@@ -135,9 +135,12 @@ fn setup_keys(state: &State, key: KeyEvent) -> Option<Action> {
             KeyCode::Down => Some(Action::MoveSelection(1)),
             KeyCode::Enter => Some(Action::ConnectProvider),
             KeyCode::Esc => Some(Action::ClearSearch),
-            KeyCode::Backspace => provider_search_backspace(state),
+            KeyCode::Backspace => Some(provider_filter_edit(FilterEdit::Backspace)),
+            KeyCode::Delete => Some(provider_filter_edit(FilterEdit::Delete)),
+            KeyCode::Home => Some(provider_filter_edit(FilterEdit::Home)),
+            KeyCode::End => Some(provider_filter_edit(FilterEdit::End)),
             KeyCode::Char('F') => Some(Action::ToggleFavorite),
-            KeyCode::Char(c) => provider_search_char(state, c),
+            KeyCode::Char(c) => Some(provider_filter_edit(FilterEdit::Insert(c))),
             _ => None,
         },
         Pane::Models => match key.code {
@@ -176,21 +179,6 @@ fn setup_keys(state: &State, key: KeyEvent) -> Option<Action> {
     }
 }
 
-/// Auto-filter: typing in the providers pane edits the search text — but
-/// reserved keys keep their action.
-fn provider_search_char(state: &State, c: char) -> Option<Action> {
-    let mut text = state.setup.provider_filter.as_str().to_string();
-    text.push(c);
-    Some(Action::SearchProviders(text))
-}
-
-/// Backspace in the providers search removes the last filter character.
-fn provider_search_backspace(state: &State) -> Option<Action> {
-    let mut text = state.setup.provider_filter.as_str().to_string();
-    text.pop();
-    Some(Action::SearchProviders(text))
-}
-
 fn run_keys(key: KeyEvent) -> Option<Action> {
     match key.code {
         KeyCode::Up => Some(Action::ScrollTranscript(1)),
@@ -216,7 +204,7 @@ fn history_keys(key: KeyEvent) -> Option<Action> {
     }
 }
 
-fn reasoning_map_keys(state: &State, key: KeyEvent) -> Option<Action> {
+fn reasoning_map_keys(key: KeyEvent) -> Option<Action> {
     match key.code {
         KeyCode::Up => Some(Action::MapMove(-1)),
         KeyCode::Down => Some(Action::MapMove(1)),
@@ -224,13 +212,21 @@ fn reasoning_map_keys(state: &State, key: KeyEvent) -> Option<Action> {
         KeyCode::F(5) => Some(Action::ReloadSnapshot),
         // Uppercase: lowercase letters belong to the live filter.
         KeyCode::Char('D') => Some(Action::CycleModelDefault),
-        KeyCode::Char(c) => Some(Action::MapFilter(format!(
-            "{}{}",
-            state.map.filter.as_str(),
-            c
-        ))),
+        KeyCode::Backspace => Some(map_filter_edit(FilterEdit::Backspace)),
+        KeyCode::Delete => Some(map_filter_edit(FilterEdit::Delete)),
+        KeyCode::Home => Some(map_filter_edit(FilterEdit::Home)),
+        KeyCode::End => Some(map_filter_edit(FilterEdit::End)),
+        KeyCode::Char(c) => Some(map_filter_edit(FilterEdit::Insert(c))),
         _ => None,
     }
+}
+
+fn provider_filter_edit(edit: FilterEdit) -> Action {
+    Action::FilterEdit(FilterTarget::Providers, edit)
+}
+
+fn map_filter_edit(edit: FilterEdit) -> Action {
+    Action::FilterEdit(FilterTarget::ReasoningMap, edit)
 }
 
 #[cfg(test)]
@@ -274,7 +270,10 @@ mod tests {
         s.setup.focus = Pane::Providers;
         assert!(matches!(
             dispatch(&s, key(KeyCode::Char('q'))),
-            Some(Action::SearchProviders(text)) if text == "q"
+            Some(Action::FilterEdit(
+                FilterTarget::Providers,
+                FilterEdit::Insert('q')
+            ))
         ));
         s.modal = Some(Modal::EnterKey {
             provider_id: "x".into(),
@@ -296,7 +295,10 @@ mod tests {
         // Providers pane is the default focus: typing searches.
         assert!(matches!(
             dispatch(&s, key(KeyCode::Char('g'))),
-            Some(Action::SearchProviders(text)) if text == "g"
+            Some(Action::FilterEdit(
+                FilterTarget::Providers,
+                FilterEdit::Insert('g')
+            ))
         ));
         assert!(matches!(
             dispatch(&s, key(KeyCode::Char('F'))),
@@ -311,7 +313,21 @@ mod tests {
         s.setup.provider_filter = "grok".into();
         assert!(matches!(
             dispatch(&s, key(KeyCode::Backspace)),
-            Some(Action::SearchProviders(text)) if text == "gro"
+            Some(Action::FilterEdit(
+                FilterTarget::Providers,
+                FilterEdit::Backspace
+            ))
+        ));
+        assert!(matches!(
+            dispatch(&s, key(KeyCode::Home)),
+            Some(Action::FilterEdit(
+                FilterTarget::Providers,
+                FilterEdit::Home
+            ))
+        ));
+        assert!(matches!(
+            dispatch(&s, key(KeyCode::End)),
+            Some(Action::FilterEdit(FilterTarget::Providers, FilterEdit::End))
         ));
     }
 
@@ -321,7 +337,17 @@ mod tests {
         s.screen = crate::action::Screen::Reasoning;
         assert!(matches!(
             dispatch(&s, key(KeyCode::Char('q'))),
-            Some(Action::MapFilter(text)) if text == "q"
+            Some(Action::FilterEdit(
+                FilterTarget::ReasoningMap,
+                FilterEdit::Insert('q')
+            ))
+        ));
+        assert!(matches!(
+            dispatch(&s, key(KeyCode::Backspace)),
+            Some(Action::FilterEdit(
+                FilterTarget::ReasoningMap,
+                FilterEdit::Backspace
+            ))
         ));
         // Uppercase D is still the cycle-default binding.
         assert!(matches!(

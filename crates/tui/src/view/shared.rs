@@ -87,7 +87,7 @@ pub fn status_line(state: &State) -> String {
             run.provider_id,
             run.model_id,
             run.reasoning,
-            run.started.elapsed().as_secs(),
+            run.elapsed().as_secs(),
             if run.status != crate::state::RunSessionStatus::Running {
                 " (done)"
             } else {

@@ -175,6 +175,10 @@ impl Provider for RoutedProvider {
         ) && self.base_url.is_some()
     }
 
+    fn supports_device_flow(&self) -> bool {
+        matches!(self.protocol, ProtocolKind::Copilot)
+    }
+
     fn caps(&self) -> ProviderCaps {
         self.protocol_caps()
     }
@@ -233,112 +237,127 @@ impl Provider for RoutedProvider {
     }
 
     async fn chat(&self, request: &ChatRequest) -> Result<ChatResponse> {
-        match self.protocol {
-            ProtocolKind::OpenAiCompat => {
-                let base = self.base_url.clone().ok_or_else(|| {
-                    CoreError::Other(format!(
-                        "provider `{}` has no API URL — configure base_url in providers/*.toml",
-                        self.id
-                    ))
-                })?;
-                let key = self.key().await?;
-                let url = format!("{}/chat/completions", base.trim_end_matches('/'));
-                let headers = vec![("authorization".to_string(), format!("Bearer {key}"))];
-                self.chat_openai_wire(url, headers, request).await
-            }
-            ProtocolKind::OpenAiCompatIbmIam => {
-                let api_key = self.key().await?;
-                let token = preauth::ibm_iam_token(&api_key).await?;
-                let host = std::env::var("WATSONX_AI_URL")
-                    .unwrap_or_else(|_| "https://eu-de.ml.cloud.ibm.com".into());
-                let project = std::env::var("WATSONX_AI_PROJECT_ID")
-                    .map_err(|_| CoreError::Other("watsonx: set WATSONX_AI_PROJECT_ID".into()))?;
-                let url = format!(
-                    "{}/ml/v1/text/chat?version=2024-05-31&project_id={project}",
-                    host.trim_end_matches('/')
-                );
-                let headers = vec![("authorization".to_string(), format!("Bearer {token}"))];
-                self.chat_openai_wire(url, headers, request).await
-            }
-            ProtocolKind::OpenAiCompatOauthCc => {
-                let (base, token) = self.sap_ai_core_endpoint().await?;
-                let url = format!("{base}/v2/chat/completions");
-                let headers = vec![("authorization".to_string(), format!("Bearer {token}"))];
-                self.chat_openai_wire(url, headers, request).await
-            }
-            ProtocolKind::AnthropicCompat => {
-                let base = self.base_url.clone().ok_or_else(|| missing_base(self))?;
-                let key = self.key().await?;
-                let url = format!("{}/messages", base.trim_end_matches('/'));
-                let headers = vec![
-                    ("x-api-key".to_string(), key),
-                    ("anthropic-version".to_string(), "2023-06-01".into()),
-                ];
-                let started = std::time::Instant::now();
-                let payload = crate::wire_anthropic::build_chat_payload(
-                    request,
-                    crate::wire_anthropic::AnthropicWireOpts {
-                        supports_thinking: true,
-                    },
-                );
-                let body = http::post_json(&self.http, &url, headers, &payload).await?;
-                crate::wire_anthropic::parse_chat_response(
-                    &body,
-                    started.elapsed().as_millis() as u64,
-                    Vec::new(),
-                )
-            }
-            ProtocolKind::Azure => {
-                // The two catalog entries use different env names for the
-                // resource (and different default domains).
-                let resource_env = if self.id == "azure-cognitive-services" {
-                    "AZURE_COGNITIVE_SERVICES_RESOURCE_NAME"
-                } else {
-                    "AZURE_RESOURCE_NAME"
-                };
-                let base = azure::resolve_base(self.base_url.as_deref(), resource_env)?;
-                let key = self.key().await?;
-                azure::chat(&self.http, &base, &key, request).await
-            }
-            ProtocolKind::GeminiNative => {
-                let base = self.base_url.clone().ok_or_else(|| missing_base(self))?;
-                let key = self.key().await?;
-                gemini::chat(&self.http, &base, &key, request).await
-            }
-            ProtocolKind::VertexGemini => {
-                vertex::chat(&self.http, false, request, &self.auth_store).await
-            }
-            ProtocolKind::VertexAnthropic => {
-                vertex::chat(&self.http, true, request, &self.auth_store).await
-            }
-            ProtocolKind::Bedrock => bedrock::chat(&self.http, request, &self.auth_store).await,
-            ProtocolKind::Cohere => {
-                let base = self.base_url.clone().ok_or_else(|| missing_base(self))?;
-                let key = self.key().await?;
-                cohere::chat(&self.http, &base, &key, request).await
-            }
-            ProtocolKind::GitLabDuo => {
-                let base = self
-                    .base_url
-                    .clone()
-                    .or_else(|| std::env::var("GITLAB_AI_GATEWAY_URL").ok())
-                    .ok_or_else(|| missing_base(self))?;
-                let key = self.key().await?;
-                let url = format!("{}/chat/completions", base.trim_end_matches('/'));
-                let headers = vec![("authorization".to_string(), format!("Bearer {key}"))];
-                self.chat_openai_wire(url, headers, request).await
-            }
-            ProtocolKind::Copilot => {
-                let base = self
-                    .base_url
-                    .clone()
-                    .unwrap_or_else(|| "https://api.githubcopilot.com".into());
-                let token = copilot_live_token(&self.auth_store).await?;
-                let url = format!("{}/chat/completions", base.trim_end_matches('/'));
-                self.chat_openai_wire(url, copilot_headers(&token), request)
-                    .await
+        // Enforce protocol capabilities before building any wire payload:
+        // never advertise tools/caching the route cannot carry.
+        let mut warnings: Vec<String> = Vec::new();
+        let effective = self.effective_request(request, &mut warnings);
+        let request = &effective;
+        let result = async {
+            match self.protocol {
+                ProtocolKind::OpenAiCompat => {
+                    let base = self.base_url.clone().ok_or_else(|| {
+                        CoreError::Other(format!(
+                            "provider `{}` has no API URL — configure base_url in providers/*.toml",
+                            self.id
+                        ))
+                    })?;
+                    let key = self.key().await?;
+                    let url = format!("{}/chat/completions", base.trim_end_matches('/'));
+                    let headers = vec![("authorization".to_string(), format!("Bearer {key}"))];
+                    self.chat_openai_wire(url, headers, request).await
+                }
+                ProtocolKind::OpenAiCompatIbmIam => {
+                    let api_key = self.key().await?;
+                    let token = preauth::ibm_iam_token(&api_key).await?;
+                    let host = std::env::var("WATSONX_AI_URL")
+                        .unwrap_or_else(|_| "https://eu-de.ml.cloud.ibm.com".into());
+                    let project = std::env::var("WATSONX_AI_PROJECT_ID").map_err(|_| {
+                        CoreError::Other("watsonx: set WATSONX_AI_PROJECT_ID".into())
+                    })?;
+                    let url = format!(
+                        "{}/ml/v1/text/chat?version=2024-05-31&project_id={project}",
+                        host.trim_end_matches('/')
+                    );
+                    let headers = vec![("authorization".to_string(), format!("Bearer {token}"))];
+                    self.chat_openai_wire(url, headers, request).await
+                }
+                ProtocolKind::OpenAiCompatOauthCc => {
+                    let (base, token) = self.sap_ai_core_endpoint().await?;
+                    let url = format!("{base}/v2/chat/completions");
+                    let headers = vec![("authorization".to_string(), format!("Bearer {token}"))];
+                    self.chat_openai_wire(url, headers, request).await
+                }
+                ProtocolKind::AnthropicCompat => {
+                    let base = self.base_url.clone().ok_or_else(|| missing_base(self))?;
+                    let key = self.key().await?;
+                    let url = format!("{}/messages", base.trim_end_matches('/'));
+                    let headers = vec![
+                        ("x-api-key".to_string(), key),
+                        ("anthropic-version".to_string(), "2023-06-01".into()),
+                    ];
+                    let started = std::time::Instant::now();
+                    let payload = crate::wire_anthropic::build_chat_payload(
+                        request,
+                        crate::wire_anthropic::AnthropicWireOpts {
+                            supports_thinking: true,
+                        },
+                    );
+                    let body = http::post_json(&self.http, &url, headers, &payload).await?;
+                    crate::wire_anthropic::parse_chat_response(
+                        &body,
+                        started.elapsed().as_millis() as u64,
+                        Vec::new(),
+                    )
+                }
+                ProtocolKind::Azure => {
+                    // The two catalog entries use different env names for the
+                    // resource (and different default domains).
+                    let resource_env = if self.id == "azure-cognitive-services" {
+                        "AZURE_COGNITIVE_SERVICES_RESOURCE_NAME"
+                    } else {
+                        "AZURE_RESOURCE_NAME"
+                    };
+                    let base = azure::resolve_base(self.base_url.as_deref(), resource_env)?;
+                    let key = self.key().await?;
+                    azure::chat(&self.http, &base, &key, request).await
+                }
+                ProtocolKind::GeminiNative => {
+                    let base = self.base_url.clone().ok_or_else(|| missing_base(self))?;
+                    let key = self.key().await?;
+                    gemini::chat(&self.http, &base, &key, request).await
+                }
+                ProtocolKind::VertexGemini => {
+                    vertex::chat(&self.http, false, request, &self.auth_store).await
+                }
+                ProtocolKind::VertexAnthropic => {
+                    vertex::chat(&self.http, true, request, &self.auth_store).await
+                }
+                ProtocolKind::Bedrock => bedrock::chat(&self.http, request, &self.auth_store).await,
+                ProtocolKind::Cohere => {
+                    let base = self.base_url.clone().ok_or_else(|| missing_base(self))?;
+                    let key = self.key().await?;
+                    cohere::chat(&self.http, &base, &key, request).await
+                }
+                ProtocolKind::GitLabDuo => {
+                    let base = self
+                        .base_url
+                        .clone()
+                        .or_else(|| std::env::var("GITLAB_AI_GATEWAY_URL").ok())
+                        .ok_or_else(|| missing_base(self))?;
+                    let key = self.key().await?;
+                    let url = format!("{}/chat/completions", base.trim_end_matches('/'));
+                    let headers = vec![("authorization".to_string(), format!("Bearer {key}"))];
+                    self.chat_openai_wire(url, headers, request).await
+                }
+                ProtocolKind::Copilot => {
+                    let base = self
+                        .base_url
+                        .clone()
+                        .unwrap_or_else(|| "https://api.githubcopilot.com".into());
+                    let token = copilot_live_token(&self.auth_store).await?;
+                    let url = format!("{}/chat/completions", base.trim_end_matches('/'));
+                    self.chat_openai_wire(url, copilot_headers(&token), request)
+                        .await
+                }
             }
         }
+        .await;
+        result.map(|mut resp| {
+            let mut all = warnings;
+            all.append(&mut resp.warnings);
+            resp.warnings = all;
+            resp
+        })
     }
 
     /// Streaming variant. Protocols without SSE support fall back to the
@@ -553,8 +572,17 @@ async fn copilot_live_token(store_lock: &std::sync::Mutex<AuthStore>) -> Result<
 fn copilot_headers(token: &str) -> Vec<(String, String)> {
     vec![
         ("authorization".to_string(), format!("Bearer {token}")),
-        ("editor-version".to_string(), "vscode/1.95.0".into()),
-        ("editor-plugin-version".to_string(), "copilot/1.0".into()),
+        ("editor-version".to_string(), copilot::editor_version()),
+        (
+            "editor-plugin-version".to_string(),
+            copilot::EDITOR_PLUGIN_VERSION.into(),
+        ),
+        (
+            "copilot-integration-id".to_string(),
+            copilot::INTEGRATION_ID.into(),
+        ),
+        // Programmatic agent traffic (not user-initiated typing).
+        ("x-initiator".to_string(), "agent".into()),
         ("user-agent".to_string(), "lmhub-runner".into()),
     ]
 }
@@ -567,6 +595,24 @@ fn is_chat_model(m: &serde_json::Value) -> bool {
 }
 
 impl RoutedProvider {
+    /// Request as the route will actually carry it: tools stripped when the
+    /// protocol cannot use them, prompt caching disabled when unsupported.
+    fn effective_request(&self, request: &ChatRequest, warnings: &mut Vec<String>) -> ChatRequest {
+        let caps = self.protocol_caps();
+        let mut effective = request.clone();
+        if !caps.prompt_caching {
+            effective.enable_prompt_cache = false;
+        }
+        if !caps.tool_calls && !effective.tools.is_empty() {
+            effective.tools.clear();
+            warnings.push(format!(
+                "provider `{}` protocol does not support tools; tools stripped",
+                self.id
+            ));
+        }
+        effective
+    }
+
     /// Per-protocol capability truth (AGENTS invariant 2: adapters must not
     /// over-claim). Per-model flags from Models.dev narrow this further at
     /// selection time; unsupported optional params still degrade via adapter

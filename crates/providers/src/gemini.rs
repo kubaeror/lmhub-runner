@@ -167,18 +167,22 @@ pub fn parse_response(
             text_parts.push(text.to_string());
         }
         if let Some(call) = part.get("functionCall") {
+            let name = call
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            // Prefer the provider's functionCall.id; synthesize a stable one
+            // only when the wire omits it.
+            let id = call
+                .get("id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .unwrap_or_else(|| format!("call-{name}"));
             tool_calls.push(ToolCallRequest {
-                id: format!(
-                    "call-{}",
-                    call.get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown")
-                ),
-                name: call
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
+                id,
+                name,
                 arguments: call.get("args").cloned().unwrap_or_else(|| json!({})),
             });
         }

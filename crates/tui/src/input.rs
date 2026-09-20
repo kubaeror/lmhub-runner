@@ -81,6 +81,16 @@ impl EditField {
             .unwrap_or(self.value.len());
     }
 
+    /// Move the cursor to the start of the field.
+    pub fn move_home(&mut self) {
+        self.cursor = 0;
+    }
+
+    /// Move the cursor to the end of the field.
+    pub fn move_end(&mut self) {
+        self.cursor = self.value.len();
+    }
+
     /// Insert `text` at the cursor. The caller strips control characters
     /// (see `reduce::paste_text`); this just splices chars in order.
     pub fn paste(&mut self, text: &str) {

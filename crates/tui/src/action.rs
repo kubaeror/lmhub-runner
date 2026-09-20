@@ -3,6 +3,27 @@
 use crate::state::Pane;
 use crate::UiMsg;
 
+/// Text filters edited with an on-screen cursor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilterTarget {
+    /// Setup screen provider search.
+    Providers,
+    /// Reasoning map model filter.
+    ReasoningMap,
+}
+
+/// One cursor-aware edit of a filter field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilterEdit {
+    Insert(char),
+    Backspace,
+    Delete,
+    Left,
+    Right,
+    Home,
+    End,
+}
+
 /// Everything the UI can do. `State::reduce` folds these; the returned
 /// [`Effect`]s are executed by the event loop.
 #[derive(Clone)]
@@ -24,8 +45,8 @@ pub enum Action {
     /// Mouse click inside a setup pane.
     FocusPane(Pane),
     MoveSelection(i32),
-    /// Live provider search text (auto-filter on typing).
-    SearchProviders(String),
+    /// Cursor-aware edit of an inline filter field (provider search / map).
+    FilterEdit(FilterTarget, FilterEdit),
     ClearSearch,
     ToggleFavorite,
     /// `Enter` on the focused provider: connect flow or key modal.
@@ -77,7 +98,6 @@ pub enum Action {
     OpenHistoryDetail,
 
     // ---- reasoning map ----------------------------------------------------
-    MapFilter(String),
     MapClear,
     MapMove(i32),
     /// `d` on the map: cycle the default reasoning for the selected model.

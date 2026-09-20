@@ -70,6 +70,7 @@ impl State {
                 run.status = status;
                 run.cancel = Some(cancel.clone());
                 run.started = Instant::now();
+                run.finished_at = None;
                 run.transcript = Transcript::default();
                 run.tokens = Default::default();
                 run.tool_ok = 0;
@@ -150,6 +151,7 @@ mod tests {
             task: "t".into(),
             status,
             started: Instant::now(),
+            finished_at: None,
             cancel: Some(CancellationToken::new()),
             transcript: Transcript::default(),
             tokens: Default::default(),
