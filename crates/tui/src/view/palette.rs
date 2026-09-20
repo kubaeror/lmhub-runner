@@ -23,12 +23,14 @@ const RUN_DETAIL_MODAL: (u16, u16) = (70, 18);
 const FINAL_TEXT_CAP: usize = 1_200;
 const FINAL_TEXT_WRAP: usize = 100;
 
-pub fn draw(f: &mut Frame, state: &State, modal: &Modal) {
+pub fn draw(f: &mut Frame, state: &State, modal: &Modal, info: &mut crate::view::RenderInfo) {
     match modal {
         Modal::EnterKey { provider_id, input } => {
             draw_key_entry(f, provider_id, input);
         }
-        Modal::Palette { filter, cursor } => draw_palette(f, state, filter.as_str(), *cursor),
+        Modal::Palette { filter, cursor } => {
+            info.palette_list = Some(draw_palette(f, state, filter.as_str(), *cursor));
+        }
         Modal::Help => draw_help(f, state),
         Modal::BulkConfirm => draw_bulk_confirm(f, state),
         Modal::HistoryDetail { text, scroll } => {
@@ -73,7 +75,7 @@ fn draw_key_entry(f: &mut Frame, provider_id: &str, input: &crate::input::EditFi
     f.render_widget(Paragraph::new(shown), inner);
 }
 
-fn draw_palette(f: &mut Frame, state: &State, filter: &str, cursor: usize) {
+fn draw_palette(f: &mut Frame, state: &State, filter: &str, cursor: usize) -> Rect {
     let area = centered_rect(f.area(), PALETTE_MODAL.0, PALETTE_MODAL.1);
     let inner = modal_frame(f, area, " Commands (type to filter, Esc closes) ".into());
 
@@ -112,6 +114,8 @@ fn draw_palette(f: &mut Frame, state: &State, filter: &str, cursor: usize) {
     let mut st =
         ListState::default().with_selected(Some(cursor.min(commands.len().saturating_sub(1))));
     f.render_stateful_widget(list, rows[1], &mut st);
+    // Not indented by a border: render_stateful_widget does not add one here.
+    rows[1]
 }
 
 fn cmd_icon(cmd: PaletteCmd) -> &'static str {

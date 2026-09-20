@@ -214,6 +214,13 @@ impl RunSession {
             .unwrap_or_else(Instant::now)
             .saturating_duration_since(self.started)
     }
+
+    /// Mark a queued session as cancelled (shared by every cancel path).
+    pub fn cancel_while_pending(&mut self) {
+        self.status = RunSessionStatus::Finished;
+        self.finished_at = Some(Instant::now());
+        self.finished_line = Some("■ cancelled (was queued)".into());
+    }
 }
 
 impl RunRegistry {
@@ -973,14 +980,10 @@ fn provider_row_index(state: &State, registry_idx: usize) -> Option<usize> {
 /// same semantics as the setup pane: no reasoning → off only; empty
 /// declaration → off only; no declaration → all levels.
 fn levels_for(model: &ModelInfo) -> Vec<ReasoningLevel> {
-    if !model.capabilities.reasoning {
-        return vec![ReasoningLevel::Off];
-    }
-    match &model.capabilities.reasoning_levels {
-        Some(levels) if levels.is_empty() => vec![ReasoningLevel::Off],
-        Some(levels) => levels.clone(),
-        None => ReasoningLevel::ALL.to_vec(),
-    }
+    crate::reasoning_map::offered_levels(
+        model.capabilities.reasoning,
+        model.capabilities.reasoning_levels.as_deref(),
+    )
 }
 
 /// One (provider, model) pair from the bulk selection, resolved to a model
@@ -1071,6 +1074,33 @@ mod prefs_tests {
     #[test]
     fn prefs_default_is_a_sane_two() {
         assert_eq!(SessionPrefs::default().max_concurrent_runs, 2);
+    }
+
+    #[test]
+    fn setup_levels_match_the_map_rule() {
+        use lmhub_core::Capabilities;
+        let model = |reasoning: bool, levels: Option<Vec<ReasoningLevel>>| lmhub_core::ModelInfo {
+            capabilities: Capabilities {
+                reasoning,
+                reasoning_levels: levels,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        for (reasoning, levels) in [
+            (false, None),
+            (false, Some(vec![])),
+            (true, Some(vec![])),
+            (true, Some(vec![ReasoningLevel::Off, ReasoningLevel::High])),
+            (true, None),
+        ] {
+            let m = model(reasoning, levels.clone());
+            assert_eq!(
+                levels_for(&m),
+                crate::reasoning_map::offered_levels(reasoning, levels.as_deref()),
+                "setup and map must offer the same levels"
+            );
+        }
     }
 
     #[test]

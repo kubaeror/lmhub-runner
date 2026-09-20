@@ -34,10 +34,7 @@ impl State {
                 let mut notice = None;
                 if let Some(run) = self.runs.selected_run_mut() {
                     match run.status {
-                        RunSessionStatus::Pending => {
-                            run.status = RunSessionStatus::Finished;
-                            run.finished_line = Some("■ cancelled (was queued)".into());
-                        }
+                        RunSessionStatus::Pending => run.cancel_while_pending(),
                         RunSessionStatus::Running => {
                             if let Some(c) = &run.cancel {
                                 c.cancel();
@@ -123,10 +120,7 @@ impl State {
                     }
                     cancelled += 1;
                 }
-                RunSessionStatus::Pending => {
-                    run.status = RunSessionStatus::Finished;
-                    run.finished_line = Some("■ cancelled (was queued)".into());
-                }
+                RunSessionStatus::Pending => run.cancel_while_pending(),
                 RunSessionStatus::Finished => {}
             }
         }

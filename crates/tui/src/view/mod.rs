@@ -49,6 +49,9 @@ pub struct RenderInfo {
     /// Full-width list regions of the History / Reasoning screens.
     pub history_list: Rect,
     pub map_list: Rect,
+    /// Command-palette list area while the palette modal is open (mouse
+    /// clicks/rows map to commands).
+    pub palette_list: Option<Rect>,
     pub offsets: ListOffsets,
 }
 
@@ -116,7 +119,7 @@ pub fn draw(f: &mut Frame, state: &State) -> RenderInfo {
     f.render_widget(Paragraph::new(footer), chunks[2]);
 
     if let Some(modal) = &state.modal {
-        palette::draw(f, state, modal);
+        palette::draw(f, state, modal, &mut info);
     }
     info
 }
@@ -126,7 +129,17 @@ pub fn draw(f: &mut Frame, state: &State) -> RenderInfo {
 ///
 /// While a modal is open the screen behind it must not react to clicks.
 pub fn mouse_action(state: &State, info: &RenderInfo, col: u16, row: u16) -> Option<Action> {
-    if state.modal.is_some() {
+    if state.modal.is_some() && !matches!(state.modal, Some(Modal::Palette { .. })) {
+        return None;
+    }
+    let pos = Position::new(col, row);
+    if let Some(Modal::Palette { .. }) = &state.modal {
+        // Command rows are clickable (palette mouse parity). The recorded
+        // rect is the list area itself (no border), so row 0 is `rect.y`.
+        let rect = info.palette_list?;
+        if rect.contains(pos) {
+            return Some(Action::PaletteRunAction((row - rect.y) as usize));
+        }
         return None;
     }
     let pos = Position::new(col, row);
@@ -225,6 +238,8 @@ pub fn mouse_wheel_action(
         return match modal {
             Modal::HistoryDetail { .. } => Some(Action::ScrollHistoryDetail(dir)),
             Modal::RunDetail { .. } => Some(Action::ScrollTranscript(dir)),
+            // Wheel up = previous command (↑).
+            Modal::Palette { .. } => Some(Action::PaletteMove(-dir)),
             _ => None,
         };
     }
@@ -419,6 +434,30 @@ mod tests {
             mouse_action(&state, &info, 32, 0),
             Some(Action::SwitchScreen(Screen::Reasoning))
         ));
+    }
+
+    #[test]
+    fn palette_rows_are_clickable() {
+        let (mut state, _dir) = crate::testutil::test_state();
+        state.modal = Some(Modal::Palette {
+            filter: crate::input::EditField::new(),
+            cursor: 0,
+        });
+        let info = RenderInfo {
+            palette_list: Some(rect(10, 5, 40, 8)),
+            ..Default::default()
+        };
+        assert!(matches!(
+            mouse_action(&state, &info, 12, 5),
+            Some(Action::PaletteRunAction(0))
+        ));
+        assert!(matches!(
+            mouse_action(&state, &info, 12, 7),
+            Some(Action::PaletteRunAction(2))
+        ));
+        // Clicks on the filter line / outside the list do nothing.
+        assert!(mouse_action(&state, &info, 12, 3).is_none());
+        assert!(mouse_action(&state, &info, 12, 20).is_none());
     }
 
     #[test]

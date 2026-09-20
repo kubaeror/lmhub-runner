@@ -641,54 +641,7 @@ mod stream_tests {
 /// (e.g. "reasoning_effort" rejected, or "always engages in thinking and
 /// cannot be disabled; please use low, high, or max"). These must trigger a
 /// retry, not a hard failure.
-pub fn is_reasoning_rejection(msg: &str) -> bool {
-    let m = msg.to_ascii_lowercase();
-    if m.contains("reasoning_effort") {
-        return true;
-    }
-    let reasoning_clause = m.contains("reasoning")
-        && (m.contains("unsupported")
-            || m.contains("not supported")
-            || m.contains("invalid")
-            || m.contains("disabled")
-            || m.contains("available")
-            || m.contains("cannot"));
-    let thinking_clause = m.contains("thinking")
-        && (m.contains("unsupported")
-            || m.contains("not supported")
-            || m.contains("disabled")
-            || m.contains("cannot")
-            || m.contains("always"));
-    let effort_clause = m.contains("effort")
-        && (m.contains("unsupported") || m.contains("invalid") || m.contains("please use"));
-    reasoning_clause || thinking_clause || effort_clause
-}
-
-/// First concrete reasoning level a rejection message suggests, e.g.
-/// "please use low, high, or max" → Low. `None` when the message names no
-/// level.
-///
-/// Matching is on whole tokens (split on non-alphanumerics): substring
-/// matches inside `allowed`, `offered`, `maximum`, `below` or `slow` must
-/// not be read as levels. The earliest named token wins.
-pub fn suggested_reasoning_level(msg: &str) -> Option<ReasoningLevel> {
-    for token in msg.split(|c: char| !c.is_alphanumeric()) {
-        let level = match token.to_ascii_lowercase().as_str() {
-            "xhigh" => ReasoningLevel::XHigh,
-            "minimal" => ReasoningLevel::Minimal,
-            "medium" => ReasoningLevel::Medium,
-            "high" => ReasoningLevel::High,
-            // "maximum" is its own token and intentionally not a level name:
-            // rejecting it avoids the old substring false positive.
-            "max" => ReasoningLevel::Max,
-            "low" => ReasoningLevel::Low,
-            "none" | "off" => ReasoningLevel::Off,
-            _ => continue,
-        };
-        return Some(level);
-    }
-    None
-}
+pub(crate) use crate::wire_common::{is_reasoning_rejection, suggested_reasoning_level};
 
 /// True when a usage object actually carries token counts (guards against
 /// `"usage": {}` chunks zeroing real usage).

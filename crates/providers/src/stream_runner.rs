@@ -14,9 +14,7 @@ use lmhub_core::{
 };
 use std::time::Instant;
 
-fn truncate_body(body: &str) -> String {
-    lmhub_core::redact::scrub(&body.chars().take(600).collect::<String>())
-}
+use crate::wire_common::truncate_body;
 
 /// Turn a non-success response into the canonical provider error, consuming
 /// the body (truncated and scrubbed).
@@ -26,7 +24,7 @@ async fn status_error(resp: reqwest::Response) -> CoreError {
     CoreError::Provider(format!(
         "HTTP {}: {}",
         status.as_u16(),
-        truncate_body(&text)
+        truncate_body(&text, 600)
     ))
 }
 
@@ -195,7 +193,7 @@ pub(crate) async fn openai_sse(
             return Err(CoreError::Provider(format!(
                 "HTTP {}: {}",
                 status.as_u16(),
-                truncate_body(&text)
+                truncate_body(&text, 600)
             )));
         }
         degraded = true;
@@ -330,7 +328,7 @@ pub(crate) async fn anthropic_sse(
             return Err(CoreError::Provider(format!(
                 "HTTP {}: {}",
                 status.as_u16(),
-                truncate_body(&text)
+                truncate_body(&text, 600)
             )));
         }
         // Retry with the level the provider suggests when it names one
@@ -379,7 +377,7 @@ pub(crate) async fn gemini_sse(
             return Err(CoreError::Provider(format!(
                 "HTTP {}: {}",
                 status.as_u16(),
-                truncate_body(&text)
+                truncate_body(&text, 600)
             )));
         }
         // Degrade once: retry without thinkingConfig.

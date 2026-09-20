@@ -83,21 +83,42 @@ pub fn filtered(models: &[MapModel], query: &str) -> Vec<MapModel> {
 /// The levels actually offered for a model — the same semantics as the
 /// setup pane: no reasoning → off only; empty declaration → off only;
 /// no declaration → all levels.
-pub fn effective_levels(m: &MapModel) -> Vec<ReasoningLevel> {
-    if !m.reasoning {
+/// Levels offered for one model: `off`-only when it does not reason, the
+/// declared set when present, every level otherwise. Single source of truth
+/// for both the setup pane (`level`s_for`) and the reasoning map.
+pub fn offered_levels(reasoning: bool, declared: Option<&[ReasoningLevel]>) -> Vec<ReasoningLevel> {
+    if !reasoning {
         return vec![ReasoningLevel::Off];
     }
-    match &m.levels {
+    match declared {
         Some(levels) if levels.is_empty() => vec![ReasoningLevel::Off],
-        Some(levels) => levels.clone(),
+        Some(levels) => levels.to_vec(),
         None => ReasoningLevel::ALL.to_vec(),
     }
+}
+
+/// Levels offered for a map row.
+pub fn effective_levels(m: &MapModel) -> Vec<ReasoningLevel> {
+    offered_levels(m.reasoning, m.levels.as_deref())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use lmhub_modelsdev::catalog::{Catalog, ProviderEntry};
+
+    #[test]
+    fn offered_levels_cover_all_capability_shapes() {
+        let off = vec![ReasoningLevel::Off];
+        assert_eq!(offered_levels(false, None), off);
+        assert_eq!(offered_levels(false, Some(&[])), off);
+        assert_eq!(offered_levels(true, Some(&[])), off);
+        assert_eq!(
+            offered_levels(true, Some(&[ReasoningLevel::Off, ReasoningLevel::High])),
+            vec![ReasoningLevel::Off, ReasoningLevel::High]
+        );
+        assert_eq!(offered_levels(true, None), ReasoningLevel::ALL.to_vec());
+    }
 
     fn model_entry(id: &str, options: serde_json::Value) -> ModelEntry {
         serde_json::from_value(serde_json::json!({

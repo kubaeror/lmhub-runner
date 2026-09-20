@@ -206,8 +206,9 @@ impl State {
         if len == 0 {
             return Vec::new();
         }
+        // Wrap (like every other prompt list): the ends connect.
         self.setup.prompt_idx =
-            ((self.setup.prompt_idx as i32 + delta).max(0) as usize).min(len - 1);
+            ((self.setup.prompt_idx as i32 + delta).rem_euclid(len as i32)) as usize;
         Vec::new()
     }
 
@@ -217,7 +218,7 @@ impl State {
             return Vec::new();
         }
         self.setup.task_prompt_idx =
-            ((self.setup.task_prompt_idx as i32 + delta).max(0) as usize).min(len - 1);
+            ((self.setup.task_prompt_idx as i32 + delta).rem_euclid(len as i32)) as usize;
         Vec::new()
     }
 

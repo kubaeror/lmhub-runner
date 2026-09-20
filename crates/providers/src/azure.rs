@@ -7,6 +7,7 @@
 //! model list comes from Models.dev / local config (fallback chain).
 
 use crate::http;
+use crate::wire_common::urlencode;
 use crate::wire_openai::{self, OpenAiWireOpts};
 use lmhub_core::{ChatRequest, ChatResponse, CoreError, Result};
 use std::time::Instant;
@@ -161,19 +162,6 @@ async fn degrade_once(
         vec![warning.to_string()],
     )
     .ok()
-}
-
-fn urlencode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
-            }
-            other => out.push_str(&format!("%{other:02X}")),
-        }
-    }
-    out
 }
 
 /// Streaming hits the same deployment endpoint with `stream: true`.

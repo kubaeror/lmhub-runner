@@ -14,6 +14,7 @@
 use crate::credentials;
 use crate::http;
 use crate::sigv4;
+use crate::wire_common::urlencode;
 use lmhub_core::{
     ChatRequest, ChatResponse, CoreError, Result, Role, StopReason, ToolCallRequest, Usage,
 };
@@ -108,19 +109,6 @@ pub fn converse_url(region: &str, model_id: &str) -> String {
         "https://bedrock-runtime.{region}.amazonaws.com/model/{}/converse",
         urlencode(model_id)
     )
-}
-
-fn urlencode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
-            }
-            other => out.push_str(&format!("%{other:02X}")),
-        }
-    }
-    out
 }
 
 pub fn build_payload(request: &ChatRequest) -> Value {

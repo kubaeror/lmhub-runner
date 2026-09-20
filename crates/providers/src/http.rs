@@ -331,12 +331,7 @@ async fn take_json(resp: reqwest::Response) -> Result<Value> {
 }
 
 fn truncate_body(body: &str) -> String {
-    let scrubbed = redact::scrub(body);
-    let mut s: String = scrubbed.chars().take(600).collect();
-    if scrubbed.chars().count() > 600 {
-        s.push('…');
-    }
-    s
+    crate::wire_common::truncate_body(body, 600)
 }
 
 fn to_header_map(headers: Vec<(String, String)>) -> Result<reqwest::header::HeaderMap> {

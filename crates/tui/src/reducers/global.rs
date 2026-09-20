@@ -179,8 +179,7 @@ impl State {
                         c.cancel();
                     }
                 } else if run.status == RunSessionStatus::Pending {
-                    run.status = RunSessionStatus::Finished;
-                    run.finished_line = Some("■ cancelled (was queued)".into());
+                    run.cancel_while_pending();
                 }
             }
             self.cancel_requested = true;
