@@ -111,6 +111,25 @@ jobs:
             exit 1
           fi
 
+  prompt-drift:
+    name: prompt files drift
+    runs-on: ubuntu-latest
+    # Prompt files are generated from the lmhub-core constants; a manual edit
+    # would otherwise change what the release tarball ships.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo run -p xtask -- sync-prompts
+      - name: Detect changes
+        run: |
+          if ! git diff --exit-code prompts/ >/dev/null; then
+            echo "::error::prompt files drifted — regenerate with: cargo run -p xtask -- sync-prompts"
+            exit 1
+          fi
+
   deps-outdated:
     name: cargo outdated (direct deps)
     runs-on: ubuntu-latest

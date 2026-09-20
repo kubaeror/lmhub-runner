@@ -1556,6 +1556,13 @@ fn glob_match_chars(p: &[char], s: &[char], scratch: &mut Vec<bool>) -> bool {
 mod tests {
     use super::*;
 
+    /// The prompt's tool table and the sandbox specs must not drift.
+    #[test]
+    fn tool_specs_match_core_tool_names() {
+        let names: Vec<String> = tool_specs().into_iter().map(|t| t.name).collect();
+        assert_eq!(names, lmhub_core::TOOL_NAMES.to_vec());
+    }
+
     fn runtime() -> (tempfile::TempDir, ToolRuntime) {
         runtime_with(true)
     }

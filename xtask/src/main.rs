@@ -2,6 +2,10 @@
 //!
 //! `cargo run -p xtask gen-providers` regenerates the bundled known-providers
 //! snapshot from https://models.dev/api.json.
+//!
+//! `cargo run -p xtask sync-prompts` regenerates `prompts/default.md` and
+//! `prompts/task-prompts/default.md` from the canonical constants in
+//! `lmhub-core` (CI fails on drift).
 
 use sha2::{Digest, Sha256};
 
@@ -13,14 +17,36 @@ async fn main() -> anyhow::Result<()> {
     let task = std::env::args().nth(1).unwrap_or_default();
     match task.as_str() {
         "gen-providers" => gen_providers().await,
+        "sync-prompts" => sync_prompts(),
         other => {
-            eprintln!("usage: cargo run -p xtask -- gen-providers");
+            eprintln!("usage: cargo run -p xtask -- gen-providers | sync-prompts");
             if !other.is_empty() {
                 anyhow::bail!("unknown task: {other}");
             }
             Ok(())
         }
     }
+}
+
+/// The canonical prompt text lives in `lmhub-core`; these files are generated
+/// copies so the release tarball and first-run materialization ship the same
+/// text the code embeds.
+fn sync_prompts() -> anyhow::Result<()> {
+    let files: [(&str, &str); 2] = [
+        ("prompts/default.md", lmhub_core::DEFAULT_SYSTEM_PROMPT),
+        (
+            "prompts/task-prompts/default.md",
+            lmhub_core::DEFAULT_TASK_PROMPT,
+        ),
+    ];
+    for (path, contents) in files {
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, format!("{}\n", contents.trim_end()))?;
+        println!("wrote {path}");
+    }
+    Ok(())
 }
 
 async fn gen_providers() -> anyhow::Result<()> {
