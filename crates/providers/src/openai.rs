@@ -149,7 +149,7 @@ impl Provider for NativeOpenAiProvider {
                     .await
                     .map(|r| merge_warnings(r, warnings))
             }
-            Err(CoreError::Provider(msg)) if is_tools_rejection(&msg) => {
+            Err(CoreError::Provider(msg)) if crate::wire_common::is_tools_rejection(&msg) => {
                 // Attempt 3: no tool support on this route — degrade to plain text.
                 warnings.push(
                     "provider rejected `tools`; retried without tools (agent loop disabled)".into(),
@@ -177,11 +177,6 @@ impl Provider for NativeOpenAiProvider {
         let headers = vec![("authorization".to_string(), format!("Bearer {key}"))];
         crate::stream_runner::openai_sse(&self.http, url, headers, request).await
     }
-}
-
-fn is_tools_rejection(msg: &str) -> bool {
-    let m = msg.to_ascii_lowercase();
-    m.contains("'tools'") || m.contains("\"tools\"") || m.contains("tool use is not supported")
 }
 
 #[cfg(test)]

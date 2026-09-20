@@ -45,7 +45,14 @@ pub fn build_payload(request: &ChatRequest) -> Value {
                             json!({
                                 "id": c.id,
                                 "type": "function",
-                                "function": {"name": c.name, "arguments": c.arguments},
+                                "function": {
+                                    "name": c.name,
+                                    // Cohere expects a JSON-encoded string here,
+                                    // not a nested JSON object (OpenAI-wire
+                                    // convention).
+                                    "arguments": serde_json::to_string(&c.arguments)
+                                        .unwrap_or_else(|_| "{}".to_string()),
+                                },
                             })
                         })
                         .collect();
@@ -100,6 +107,7 @@ pub fn parse_response(
     }
 
     let mut tool_calls = Vec::new();
+    let mut warnings = warnings;
     let calls_arr = message
         .get("tool_calls")
         .or_else(|| message.get("toolCalls"))
@@ -108,21 +116,47 @@ pub fn parse_response(
         .unwrap_or_default();
     for call in &calls_arr {
         let function = call.get("function").cloned().unwrap_or(Value::Null);
+        let name = function
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        // Cohere returns `arguments` as a JSON string; tolerate the object
+        // form some gateways emit, and warn (never fail the whole response)
+        // when the string is not valid JSON.
+        let arguments = match function.get("arguments") {
+            Some(Value::String(raw)) => match serde_json::from_str::<Value>(raw) {
+                Ok(Value::Object(obj)) => Value::Object(obj),
+                Ok(other) => {
+                    warnings.push(format!(
+                        "cohere tool `{name}`: arguments string was valid JSON but not an object; wrapped as {{\"value\": …}}"
+                    ));
+                    json!({ "value": other })
+                }
+                Err(e) => {
+                    warnings.push(format!(
+                        "cohere tool `{name}`: arguments were not valid JSON ({e}); using {{}}"
+                    ));
+                    json!({})
+                }
+            },
+            Some(Value::Object(obj)) => Value::Object(obj.clone()),
+            Some(_) => {
+                warnings.push(format!(
+                    "cohere tool `{name}`: unexpected arguments shape; using {{}}"
+                ));
+                json!({})
+            }
+            None => json!({}),
+        };
         tool_calls.push(ToolCallRequest {
             id: call
                 .get("id")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .into(),
-            name: function
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .into(),
-            arguments: function
-                .get("arguments")
-                .cloned()
-                .unwrap_or_else(|| json!({})),
+            name,
+            arguments,
         });
     }
 
@@ -207,7 +241,7 @@ mod tests {
             "message": {"role": "assistant",
                         "content": [{"type": "text", "text": "hello"}],
                         "toolCalls": [{"id": "c1", "type": "function",
-                                       "function": {"name": "f", "arguments": {"a": 1}}}]},
+                                       "function": {"name": "f", "arguments": "{\"a\": 1}"}}]},
             "finish_reason": "TOOL_CALLS",
             "usage": {"tokens": {"input_tokens": 10, "output_tokens": 5}}
         });
@@ -215,5 +249,81 @@ mod tests {
         assert_eq!(resp.text, "hello");
         assert_eq!(resp.tool_calls[0].arguments["a"], json!(1));
         assert_eq!(resp.stop_reason, StopReason::ToolUse);
+        assert!(resp.warnings.is_empty(), "{:?}", resp.warnings);
+    }
+
+    #[test]
+    fn payload_encodes_tool_arguments_as_a_json_string() {
+        let req = sample_request(lmhub_core::ReasoningLevel::Off);
+        let p = build_payload(&req);
+        let args = &p["messages"][2]["tool_calls"][0]["function"]["arguments"];
+        assert!(
+            args.is_string(),
+            "Cohere requires a JSON-encoded string, got {args:?}"
+        );
+        let decoded: Value = serde_json::from_str(args.as_str().unwrap()).unwrap();
+        assert_eq!(decoded["path"], json!("a.txt"));
+    }
+
+    #[test]
+    fn invalid_tool_arguments_warn_and_empty_object() {
+        let body = json!({
+            "message": {"role": "assistant", "content": [],
+                        "tool_calls": [{"id": "c1", "function": {"name": "f", "arguments": "{not json"}}]},
+            "finish_reason": "TOOL_CALLS"
+        });
+        let resp = parse_response(&body, 5, Vec::new()).unwrap();
+        assert_eq!(resp.tool_calls[0].arguments, json!({}));
+        assert!(
+            resp.warnings.iter().any(|w| w.contains("not valid JSON")),
+            "warnings: {:?}",
+            resp.warnings
+        );
+    }
+
+    #[test]
+    fn object_form_arguments_are_accepted_as_is() {
+        // Some gateways emit an object despite the documented string shape.
+        let body = json!({
+            "message": {"role": "assistant", "content": [],
+                        "tool_calls": [{"id": "c1", "function": {"name": "f", "arguments": {"a": 2}}}]},
+            "finish_reason": "TOOL_CALLS"
+        });
+        let resp = parse_response(&body, 5, Vec::new()).unwrap();
+        assert_eq!(resp.tool_calls[0].arguments["a"], json!(2));
+        assert!(resp.warnings.is_empty(), "{:?}", resp.warnings);
+    }
+
+    /// Full round trip through a mock HTTP server: the request carries the
+    /// JSON-string arguments and the response parses back into an object.
+    #[tokio::test]
+    async fn tool_call_round_trips_through_the_wire() {
+        use crate::wire_test_util::one_shot_server;
+        let response = json!({
+            "message": {"role": "assistant", "content": [],
+                        "tool_calls": [{"id": "c1", "function": {"name": "read_file",
+                                                                 "arguments": "{\"path\":\"a.txt\"}"}}]},
+            "finish_reason": "TOOL_CALLS",
+            "usage": {"tokens": {"input_tokens": 3, "output_tokens": 4}}
+        })
+        .to_string();
+        let (base, rx) = one_shot_server(200, "application/json", response).await;
+        let req = sample_request(lmhub_core::ReasoningLevel::Off);
+        let resp = chat(&reqwest::Client::new(), &base, "key-1234567890", &req)
+            .await
+            .unwrap();
+        assert_eq!(resp.tool_calls[0].name, "read_file");
+        assert_eq!(resp.tool_calls[0].arguments["path"], json!("a.txt"));
+
+        let raw = rx.await.unwrap().to_ascii_lowercase();
+        assert!(raw.contains("authorization: bearer key-1234567890"));
+        let body: Value = {
+            let start = raw.find("\r\n\r\n").map(|i| i + 4).unwrap();
+            serde_json::from_str(&raw[start..]).unwrap()
+        };
+        assert_eq!(
+            body["messages"][2]["tool_calls"][0]["function"]["arguments"],
+            json!("{\"path\":\"a.txt\"}")
+        );
     }
 }

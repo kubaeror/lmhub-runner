@@ -95,20 +95,86 @@ pub struct TuiContext {
 /// UI tick: how often the screen redraws even without input/events.
 const TICK_INTERVAL: Duration = Duration::from_millis(200);
 
-pub async fn run_tui(ctx: TuiContext) -> anyhow::Result<()> {
-    use anyhow::Context as _;
-    enable_raw_mode().context("TUI requires an interactive terminal (run inside a real tty)")?;
-    let mut stdout = std::io::stdout();
-    execute!(
-        stdout,
-        EnterAlternateScreen,
-        EnableMouseCapture,
+/// RAII terminal state: raw mode, alternate screen, mouse capture and
+/// bracketed paste. `Drop` restores all of it — early `?` returns and panics
+/// can no longer leave the user with a broken/raw terminal.
+struct TerminalGuard {
+    active: bool,
+}
+
+impl TerminalGuard {
+    fn enter() -> anyhow::Result<Self> {
+        use anyhow::Context as _;
+        enable_raw_mode()
+            .context("TUI requires an interactive terminal (run inside a real tty)")?;
+        let mut guard = Self { active: true };
+        let mut stdout = std::io::stdout();
         // Bracketed paste: pasted text arrives as a single `Event::Paste`
         // instead of a burst of key events (which would trigger app-level
         // bindings like `q` quit or `x` bulk-run from pasted content).
-        EnableBracketedPaste
-    )
-    .context("entering alternate screen failed")?;
+        if let Err(e) = execute!(
+            stdout,
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            EnableBracketedPaste
+        ) {
+            guard.restore();
+            return Err(anyhow::Error::new(e).context("entering alternate screen failed"));
+        }
+        Ok(guard)
+    }
+
+    /// Idempotent: a second call is a no-op (explicit restore + Drop).
+    fn restore(&mut self) {
+        if !self.active {
+            return;
+        }
+        self.active = false;
+        let mut stdout = std::io::stdout();
+        // Order matters: disable input modes before leaving the alt screen.
+        let _ = execute!(
+            stdout,
+            DisableBracketedPaste,
+            DisableMouseCapture,
+            LeaveAlternateScreen
+        );
+        let _ = disable_raw_mode();
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        self.restore();
+    }
+}
+
+/// Restore the terminal *before* the default hook prints the panic, and put
+/// the panic into the log file.
+///
+/// This intentionally also fires for panics the agent loop catches and turns
+/// into error results: restoring the terminal early is harmless compared to
+/// a corrupted screen, and the run's statistics are still written.
+fn install_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let mut stdout = std::io::stdout();
+        let _ = execute!(
+            stdout,
+            DisableBracketedPaste,
+            DisableMouseCapture,
+            LeaveAlternateScreen
+        );
+        let _ = disable_raw_mode();
+        tracing::error!("panic: {info}");
+        default_hook(info);
+    }));
+}
+
+pub async fn run_tui(ctx: TuiContext) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    let _guard = TerminalGuard::enter()?;
+    install_panic_hook();
+
     let backend = CrosstermBackend::new(std::io::stdout());
     let mut terminal = Terminal::new(backend).context("terminal backend init failed")?;
 
@@ -196,13 +262,8 @@ pub async fn run_tui(ctx: TuiContext) -> anyhow::Result<()> {
     }
 
     state.prefs.save(&state.prefs_path);
-    execute!(std::io::stdout(), DisableMouseCapture)?;
-    disable_raw_mode()?;
-    execute!(
-        std::io::stdout(),
-        LeaveAlternateScreen,
-        DisableBracketedPaste
-    )?;
+    // The TerminalGuard restores raw mode / alt screen / mouse / paste on
+    // drop — including the error paths above.
     result
 }
 
@@ -341,6 +402,8 @@ fn build_agent_spec(state: &State, run_id: u64) -> Option<lmhub_agent::RunSpec> 
         enable_prompt_cache: true,
         max_turns: state.config.max_turns,
         max_output_tokens: state.config.max_output_tokens,
+        max_history_tokens: state.config.max_history_tokens,
+        tool_result_max_bytes: state.config.tool_result_max_bytes,
         deadline: state.config.run_timeout(),
         cancel,
         sandbox: lmhub_sandbox::SandboxConfig {
@@ -372,4 +435,29 @@ fn spawn_run(ui_tx: mpsc::UnboundedSender<UiMsg>, run_id: u64, spec: lmhub_agent
         };
         let _ = app_tx.send(UiMsg::RunFinished { run_id, result });
     });
+}
+
+#[cfg(test)]
+mod terminal_guard_tests {
+    use super::*;
+
+    #[test]
+    fn restore_is_idempotent_and_deactivates() {
+        let mut guard = TerminalGuard { active: true };
+        guard.restore();
+        assert!(!guard.active);
+        // Second restore (e.g. explicit restore followed by Drop) is a no-op.
+        guard.restore();
+        assert!(!guard.active);
+    }
+
+    #[test]
+    fn guard_drops_cleanly_while_unwinding() {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = TerminalGuard { active: true };
+            panic!("simulated reducer panic");
+        }));
+        assert!(result.is_err(), "panic must propagate after guard drop");
+    }
 }

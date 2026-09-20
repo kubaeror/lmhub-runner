@@ -39,7 +39,22 @@ pub struct AppConfig {
     /// refuses every command, `allow` opts into unsandboxed execution.
     /// File tools are always jailed regardless.
     pub legacy_commands: String,
+    /// Optional cap on history tokens sent per request. `None` derives the
+    /// budget from the model's context window (minus the output reserve).
+    pub max_history_tokens: Option<u64>,
+    /// Tool results larger than this (bytes) are trimmed, oldest first, when
+    /// a request would exceed the model's context window.
+    pub tool_result_max_bytes: u64,
+    /// Idle read timeout for streaming responses: a stream that produces no
+    /// byte for this long is stalled (this is not a total deadline, so
+    /// healthy long streams keep running).
+    pub stream_idle_timeout_secs: u64,
 }
+
+/// Lower bound applied to `max_history_tokens` by [`AppConfig::sanitize`].
+pub const MIN_HISTORY_TOKENS: u64 = 256;
+/// Lower bound applied to `tool_result_max_bytes` by [`AppConfig::sanitize`].
+pub const MIN_TOOL_RESULT_BYTES: u64 = 256;
 
 /// Default command allowlist: common developer tooling a coding agent needs
 /// in the workspace jail. Everything here runs via argv arrays (no shell);
@@ -71,6 +86,9 @@ impl Default for AppConfig {
             retry_cap_ms: 30_000,
             sandbox: "auto".into(),
             legacy_commands: "deny".into(),
+            max_history_tokens: None,
+            tool_result_max_bytes: 8_192,
+            stream_idle_timeout_secs: 120,
         }
     }
 }
@@ -151,6 +169,29 @@ impl AppConfig {
         } else {
             self.legacy_commands = lc;
         }
+        // Context budget: a zero/tiny cap would make every request fail.
+        match self.max_history_tokens {
+            Some(v) if v < MIN_HISTORY_TOKENS => {
+                tracing::warn!(
+                    config = "max_history_tokens",
+                    from = v,
+                    to = MIN_HISTORY_TOKENS,
+                    "clamped to minimum"
+                );
+                self.max_history_tokens = Some(MIN_HISTORY_TOKENS);
+            }
+            _ => {}
+        }
+        fix(
+            &mut self.tool_result_max_bytes,
+            MIN_TOOL_RESULT_BYTES,
+            "tool_result_max_bytes",
+        );
+        fix(
+            &mut self.stream_idle_timeout_secs,
+            1,
+            "stream_idle_timeout_secs",
+        );
     }
 
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
@@ -190,6 +231,8 @@ mod tests {
             max_retries: 0,
             retry_base_ms: 0,
             retry_cap_ms: 0,
+            max_history_tokens: Some(0),
+            tool_result_max_bytes: 0,
             ..AppConfig::default()
         };
         cfg.sanitize();
@@ -199,6 +242,8 @@ mod tests {
         assert!(cfg.max_retries >= 1);
         assert!(cfg.retry_base_ms >= 1);
         assert!(cfg.retry_cap_ms >= cfg.retry_base_ms);
+        assert_eq!(cfg.max_history_tokens, Some(MIN_HISTORY_TOKENS));
+        assert_eq!(cfg.tool_result_max_bytes, MIN_TOOL_RESULT_BYTES);
     }
 
     #[test]

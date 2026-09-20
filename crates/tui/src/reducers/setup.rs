@@ -437,6 +437,23 @@ impl State {
         effects
     }
 
+    /// Decide whether a start gets a slot now or queues: returns the status
+    /// to apply plus the launch effect when it runs immediately.
+    ///
+    /// Shared by `launch_session`, `confirm_bulk_start` and `RerunSession` so
+    /// no entry point can bypass the concurrency cap.
+    pub(crate) fn try_launch_or_queue(&self, run_id: u64) -> (RunSessionStatus, Vec<Effect>) {
+        let cap = self.prefs.max_concurrent_runs.max(1);
+        if self.runs.running_count() < cap {
+            (
+                RunSessionStatus::Running,
+                vec![Effect::LaunchRun { run_id }],
+            )
+        } else {
+            (RunSessionStatus::Pending, Vec::new())
+        }
+    }
+
     /// Create (or queue) a run session; returns its launch effect when it
     /// starts immediately.
     fn launch_session(
@@ -448,22 +465,17 @@ impl State {
         task: String,
         pricing: Option<lmhub_core::PricingContext>,
     ) -> Vec<Effect> {
-        let cap = self.prefs.max_concurrent_runs.max(1);
-        let slot_free = self.runs.running_count() < cap;
-        let cancel = CancellationToken::new();
         let id = self.runs.next_id;
         self.runs.next_id += 1;
+        let (status, mut effects) = self.try_launch_or_queue(id);
+        let cancel = CancellationToken::new();
         let session = RunSession {
             id,
             provider_id: provider.id().to_string(),
             model_id: model.id.clone(),
             reasoning: reasoning.to_string(),
             task: task.clone(),
-            status: if slot_free {
-                RunSessionStatus::Running
-            } else {
-                RunSessionStatus::Pending
-            },
+            status,
             started: Instant::now(),
             cancel: Some(cancel.clone()),
             transcript: Transcript::default(),
@@ -489,10 +501,8 @@ impl State {
         self.runs.selected = self.runs.runs.len() - 1;
         self.screen = crate::action::Screen::Run;
         self.capture_prefs();
-        let mut effects = vec![Effect::SavePrefs];
-        if slot_free {
-            effects.push(Effect::LaunchRun { run_id: id });
-        } else {
+        effects.push(Effect::SavePrefs);
+        if status == RunSessionStatus::Pending {
             self.push_notice(format!(
                 "concurrency cap reached — {} queued",
                 self.runs.runs.len()

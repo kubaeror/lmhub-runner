@@ -88,6 +88,95 @@ impl Provider for MockProvider {
     }
 }
 
+/// Mock that keeps issuing a large-output tool call for `tool_turns`
+/// requests, then answers. Records the estimated size of every request it
+/// receives so tests can assert the context budget was respected.
+struct TurnProvider {
+    tool_turns: usize,
+    calls: std::sync::Mutex<usize>,
+    request_sizes: Arc<std::sync::Mutex<Vec<u64>>>,
+}
+
+#[async_trait::async_trait]
+impl Provider for TurnProvider {
+    fn id(&self) -> &str {
+        "turn-mock"
+    }
+    fn display_name(&self) -> &str {
+        "Turn Mock"
+    }
+    fn provider_type(&self) -> &str {
+        "mock-native"
+    }
+    fn api_key_env(&self) -> &str {
+        "MOCK_API_KEY"
+    }
+    fn models_dev_hint(&self) -> Option<&str> {
+        None
+    }
+    fn supports_model_listing(&self) -> bool {
+        false
+    }
+    fn caps(&self) -> ProviderCaps {
+        ProviderCaps {
+            tool_calls: true,
+            reasoning: false,
+            prompt_caching: false,
+        }
+    }
+    async fn list_models_api(&self) -> lmhub_core::Result<Option<Vec<String>>> {
+        Ok(None)
+    }
+
+    async fn chat(&self, request: &ChatRequest) -> lmhub_core::Result<ChatResponse> {
+        self.request_sizes
+            .lock()
+            .unwrap()
+            .push(lmhub_agent::estimate_request_tokens(
+                &request.system,
+                &request.tools,
+                &request.messages,
+                request.max_tokens as u64,
+            ));
+        let mut n = self.calls.lock().unwrap();
+        *n += 1;
+        let usage = Usage {
+            input_tokens: 50,
+            output_tokens: 5,
+            ..Default::default()
+        };
+        if *n <= self.tool_turns {
+            Ok(ChatResponse {
+                text: String::new(),
+                thinking: None,
+                tool_calls: vec![ToolCallRequest {
+                    id: format!("call_{n}"),
+                    name: "run_command".into(),
+                    arguments: serde_json::json!({
+                        "argv": ["node", "-e", "console.log('x'.repeat(4000))"]
+                    }),
+                }],
+                usage,
+                stop_reason: StopReason::ToolUse,
+                raw_assistant_message: None,
+                warnings: vec![],
+                duration_ms: 3,
+            })
+        } else {
+            Ok(ChatResponse {
+                text: "done".into(),
+                thinking: None,
+                tool_calls: vec![],
+                usage,
+                stop_reason: StopReason::EndTurn,
+                raw_assistant_message: None,
+                warnings: vec![],
+                duration_ms: 3,
+            })
+        }
+    }
+}
+
 fn spec(base: &std::path::Path, provider: Arc<dyn Provider>) -> RunSpec {
     RunSpec {
         provider,
@@ -113,6 +202,8 @@ fn spec(base: &std::path::Path, provider: Arc<dyn Provider>) -> RunSpec {
         enable_prompt_cache: true,
         max_turns: 5,
         max_output_tokens: 512,
+        max_history_tokens: None,
+        tool_result_max_bytes: 8_192,
         deadline: Duration::from_secs(30),
         cancel: tokio_util::sync::CancellationToken::new(),
         sandbox: lmhub_sandbox::SandboxConfig {
@@ -265,6 +356,54 @@ async fn pricing_warnings_are_counted_in_statistics() {
     );
     assert_eq!(stats["pricing"]["totalUsd"], serde_json::Value::Null);
     assert!(events_raw.contains("run_finished"));
+}
+
+/// 40 tool turns against an 8k-window model: every provider call must fit
+/// the window, the budgeter must have trimmed/dropped history (warnings in
+/// events.jsonl), and the run must end in a sensible state.
+#[tokio::test]
+async fn context_budget_bounds_every_request_on_a_long_run() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sizes = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let provider = Arc::new(TurnProvider {
+        tool_turns: 40,
+        calls: std::sync::Mutex::new(0),
+        request_sizes: Arc::clone(&sizes),
+    });
+    let mut run_spec = spec(tmp.path(), provider);
+    run_spec.max_turns = 45; // enough for 40 tool turns + the final answer
+    run_spec.tool_result_max_bytes = 2_048; // force trimming as well as dropping
+
+    let window = run_spec.model.context_window.unwrap();
+    let outcome = execute(run_spec, None).await.unwrap();
+    assert!(outcome.persistence_error.is_none());
+
+    assert!(
+        matches!(
+            outcome.stats.status,
+            lmhub_core::RunStatus::Completed | lmhub_core::RunStatus::LimitExceeded
+        ),
+        "sensible terminal status, got {:?}",
+        outcome.stats.status
+    );
+
+    let sizes = sizes.lock().unwrap();
+    assert!(
+        sizes.len() >= 2,
+        "provider should have been called repeatedly"
+    );
+    for (i, size) in sizes.iter().enumerate() {
+        assert!(
+            *size <= window,
+            "request {i} estimated {size} tokens > window {window}"
+        );
+    }
+
+    let events = std::fs::read_to_string(outcome.run_dir.join("events.jsonl")).unwrap();
+    assert!(
+        events.contains("truncated an old tool result") || events.contains("dropped"),
+        "budgeter must record what it trimmed: {events}"
+    );
 }
 
 #[tokio::test]

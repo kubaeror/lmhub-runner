@@ -81,6 +81,9 @@ async fn run(
         base: Duration::from_millis(config.retry_base_ms),
         cap: Duration::from_millis(config.retry_cap_ms),
     });
+    lmhub_providers::init_stream_idle_timeout(Duration::from_secs(
+        config.stream_idle_timeout_secs.max(1),
+    ));
 
     init_logging(&cache_dir)?;
 

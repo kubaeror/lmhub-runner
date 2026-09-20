@@ -316,7 +316,10 @@ struct ProcessGroupGuard(Option<u32>);
 
 impl ProcessGroupGuard {
     fn new(pid: u32) -> Self {
-        Self(Some(pid))
+        // `kill(0, …)` targets our own process group: a missing child id
+        // (pid 0) must never arm the guard, or cancelling would SIGKILL the
+        // runner itself.
+        Self(if pid == 0 { None } else { Some(pid) })
     }
 
     /// Call only after the child has been reaped, so a recycled pid/group
@@ -336,9 +339,13 @@ impl Drop for ProcessGroupGuard {
 
 /// SIGKILL the whole process group (negative pid targets the group created
 /// via `process_group(0)`). Probes with `kill(pid, 0)` first so a group that
-/// no longer exists is never signaled.
+/// no longer exists is never signaled. pid 0 is refused (it means "our own
+/// group").
 #[cfg(unix)]
 fn kill_group(pid: u32) {
+    if pid == 0 {
+        return;
+    }
     let group = -(pid as libc::pid_t);
     if unsafe { libc::kill(group, 0) } == -1 {
         return;
@@ -348,9 +355,13 @@ fn kill_group(pid: u32) {
     }
 }
 
-/// SIGTERM the whole process group (grace period before SIGKILL).
+/// SIGTERM the whole process group (grace period before SIGKILL). pid 0 is
+/// refused for the same reason as [`kill_group`].
 #[cfg(unix)]
 fn terminate_group(pid: u32) {
+    if pid == 0 {
+        return;
+    }
     let group = -(pid as libc::pid_t);
     if unsafe { libc::kill(group, 0) } == -1 {
         return;
@@ -390,68 +401,13 @@ fn set_rlimit(resource: u64, value: u64) {
 /// platforms get no filter (documented limitation).
 #[cfg(target_os = "linux")]
 fn install_seccomp_filter() {
-    #[cfg(target_arch = "x86_64")]
-    const ARCH: u32 = 0xC0_00_00_3E; // AUDIT_ARCH_X86_64
-    #[cfg(target_arch = "aarch64")]
-    const ARCH: u32 = 0xC0_00_00_B7; // AUDIT_ARCH_AARCH64
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     return; // unsupported arch — no filter (documented)
 
-    #[cfg(target_arch = "x86_64")]
-    const DENIED: &[u32] = &[
-        101, 310, 311, 165, 166, 155, 246, 320, 175, 313, 176, 321, 323, 298, 304, 303, 425, 426,
-        427, 272, 308, 56,
-    ];
-    #[cfg(target_arch = "aarch64")]
-    const DENIED: &[u32] = &[
-        117, 270, 271, 40, 39, 41, 104, 294, 105, 273, 106, 280, 282, 241, 304, 303, 425, 426, 427,
-        97, 268, 220,
-    ];
-    #[cfg(target_arch = "x86_64")]
-    const CLONE_NR: u32 = 56;
-    #[cfg(target_arch = "aarch64")]
-    const CLONE_NR: u32 = 220;
-    // CLONE_NEWUSER|NEWNS|NEWPID|NEWNET|NEWIPC|NEWUTS|NEWCGROUP|NEWTIME
-    const CLONE_NEW_MASK: u32 = 0x7E_02_00_80;
-
-    // Classic BPF encoding for seccomp_data.
-    const LD_ABS_ARCH: u16 = 0x20; // BPF_LD|BPF_W|BPF_ABS, offset 4
-    const LD_ABS_NR: u16 = 0x20; // offset 0
-    const LD_ABS_ARG0: u16 = 0x20; // offset 16
-    const JEQ_K: u16 = 0x15; // BPF_JMP|BPF_JEQ|BPF_K
-    const JA: u16 = 0x05; // BPF_JMP|BPF_JA
-    const AND_K: u16 = 0x54; // BPF_ALU|BPF_AND|BPF_K
-    const RET_K: u16 = 0x06; // BPF_RET|BPF_K
-    const RET_ALLOW: u32 = 0x7FFF_0000;
-    const RET_ERRNO_EPERM: u32 = 0x0005_0001;
-    const RET_KILL: u32 = 0x8000_0000;
-
-    let ins = |code: u16, jt: u8, jf: u8, k: u32| libc::sock_filter { code, jt, jf, k };
-
-    // Jump targets are resolved as `i + 1 + jt` (JA: `i + 1 + k`) and must
-    // land strictly inside the program — every jt below accounts for that.
-    let mut f: Vec<libc::sock_filter> = Vec::with_capacity(8 + DENIED.len() * 3);
-    f.push(ins(LD_ABS_ARCH, 0, 0, 4));
-    f.push(ins(JEQ_K, 1, 0, ARCH)); // arch ok → skip the kill
-    f.push(ins(RET_K, 0, 0, RET_KILL));
-    f.push(ins(LD_ABS_NR, 0, 0, 0));
-    for nr in DENIED {
-        f.push(ins(JEQ_K, 1, 0, *nr)); // match → the RET right below
-        f.push(ins(JA, 0, 0, 1)); // no match → next syscall's JEQ
-        f.push(ins(RET_K, 0, 0, RET_ERRNO_EPERM));
-    }
-    // clone(nr == CLONE_NR): inspect flags in args[0].
-    f.push(ins(JEQ_K, 1, 0, CLONE_NR));
-    f.push(ins(JA, 0, 0, 4)); // not clone → skip the flags check
-    f.push(ins(LD_ABS_ARG0, 0, 0, 16));
-    f.push(ins(AND_K, 0, 0, CLONE_NEW_MASK));
-    f.push(ins(JEQ_K, 1, 0, 0)); // clean flags → allow
-    f.push(ins(RET_K, 0, 0, RET_ERRNO_EPERM));
-    f.push(ins(RET_K, 0, 0, RET_ALLOW));
-
+    let mut program = seccomp_program();
     let prog = libc::sock_fprog {
-        len: f.len() as u16,
-        filter: f.as_mut_ptr(),
+        len: program.len() as u16,
+        filter: program.as_mut_ptr(),
     };
     unsafe {
         libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
@@ -463,6 +419,87 @@ fn install_seccomp_filter() {
             0,
             &prog as *const _ as *mut libc::c_void,
         );
+    }
+}
+
+/// Classic-BPF program for [`install_seccomp_filter`], separated so tests can
+/// assert the encoded policy without installing it.
+#[cfg(target_os = "linux")]
+fn seccomp_program() -> Vec<libc::sock_filter> {
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        Vec::new()
+    }
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    {
+        #[cfg(target_arch = "x86_64")]
+        const ARCH: u32 = 0xC0_00_00_3E; // AUDIT_ARCH_X86_64
+        #[cfg(target_arch = "aarch64")]
+        const ARCH: u32 = 0xC0_00_00_B7; // AUDIT_ARCH_AARCH64
+
+        #[cfg(target_arch = "x86_64")]
+        const DENIED: &[u32] = &[
+            101, 310, 311, 165, 166, 155, 246, 320, 175, 313, 176, 321, 323, 298, 304, 303, 425,
+            426, 427, 272, 308,
+        ];
+        #[cfg(target_arch = "aarch64")]
+        const DENIED: &[u32] = &[
+            117, 270, 271, 40, 39, 41, 104, 294, 105, 273, 106, 280, 282, 241, 304, 303, 425, 426,
+            427, 97, 268,
+        ];
+        #[cfg(target_arch = "x86_64")]
+        const CLONE_NR: u32 = 56;
+        #[cfg(target_arch = "aarch64")]
+        const CLONE_NR: u32 = 220;
+        // clone3 shares the same syscall number on the release targets.
+        const CLONE3_NR: u32 = 435;
+        // CLONE_NEWUSER|NEWNS|NEWPID|NEWNET|NEWIPC|NEWUTS|NEWCGROUP|NEWTIME
+        const CLONE_NEW_MASK: u32 = 0x7E_02_00_80;
+        const RET_ERRNO_ENOSYS: u32 = 0x0005_0026;
+
+        // Classic BPF encoding for seccomp_data.
+        const LD_ABS_ARCH: u16 = 0x20; // BPF_LD|BPF_W|BPF_ABS, offset 4
+        const LD_ABS_NR: u16 = 0x20; // offset 0
+        const LD_ABS_ARG0: u16 = 0x20; // offset 16
+        const JEQ_K: u16 = 0x15; // BPF_JMP|BPF_JEQ|BPF_K
+        const JA: u16 = 0x05; // BPF_JMP|BPF_JA
+        const AND_K: u16 = 0x54; // BPF_ALU|BPF_AND|BPF_K
+        const RET_K: u16 = 0x06; // BPF_RET|BPF_K
+        const RET_ALLOW: u32 = 0x7FFF_0000;
+        const RET_ERRNO_EPERM: u32 = 0x0005_0001;
+        const RET_KILL: u32 = 0x8000_0000;
+
+        let ins = |code: u16, jt: u8, jf: u8, k: u32| libc::sock_filter { code, jt, jf, k };
+
+        // Jump targets are resolved as `i + 1 + jt` (JA: `i + 1 + k`) and must
+        // land strictly inside the program — every jt below accounts for that.
+        let mut f: Vec<libc::sock_filter> = Vec::with_capacity(11 + DENIED.len() * 3);
+        f.push(ins(LD_ABS_ARCH, 0, 0, 4));
+        f.push(ins(JEQ_K, 1, 0, ARCH)); // arch ok → skip the kill
+        f.push(ins(RET_K, 0, 0, RET_KILL));
+        f.push(ins(LD_ABS_NR, 0, 0, 0));
+        for nr in DENIED {
+            f.push(ins(JEQ_K, 1, 0, *nr)); // match → the RET right below
+            f.push(ins(JA, 0, 0, 1)); // no match → next syscall's JEQ
+            f.push(ins(RET_K, 0, 0, RET_ERRNO_EPERM));
+        }
+        // clone(nr == CLONE_NR): inspect flags in args[0]. `clone` must NOT be
+        // in DENIED above — a blanket deny would make this check unreachable
+        // (and break every pthread_create fallback).
+        f.push(ins(JEQ_K, 1, 0, CLONE_NR));
+        f.push(ins(JA, 0, 0, 4)); // not clone → skip the flags check
+        f.push(ins(LD_ABS_ARG0, 0, 0, 16));
+        f.push(ins(AND_K, 0, 0, CLONE_NEW_MASK));
+        f.push(ins(JEQ_K, 1, 0, 0)); // clean flags → allow
+        f.push(ins(RET_K, 0, 0, RET_ERRNO_EPERM));
+        // clone3(nr == CLONE3_NR): always ENOSYS, so glibc falls back to the
+        // already-filtered clone() instead of hard-failing. (Its flags live
+        // behind a pointer, so they cannot be inspected here.)
+        f.push(ins(JEQ_K, 1, 0, CLONE3_NR));
+        f.push(ins(JA, 0, 0, 1));
+        f.push(ins(RET_K, 0, 0, RET_ERRNO_ENOSYS));
+        f.push(ins(RET_K, 0, 0, RET_ALLOW));
+        f
     }
 }
 
@@ -577,7 +614,13 @@ mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(out.exit_code, Some(0), "node should run under {runtime:?}");
+            assert_eq!(
+                out.exit_code,
+                Some(0),
+                "node should run under {runtime:?}\nstdout: {}\nstderr: {}",
+                read_capture_tail(&out.stdout_path, 2_000),
+                read_capture_tail(&out.stderr_path, 4_000)
+            );
             let envs = read_capture_tail(&out.stdout_path, 10_000);
             assert!(
                 !envs.contains("LMHUB_PROC_TEST_SECRET"),
@@ -694,5 +737,113 @@ mod tests {
                 "sandboxed /proc must not expose the host process table (saw {count})"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_group_guard_refuses_pid_zero() {
+        let mut guard = ProcessGroupGuard::new(0);
+        assert!(
+            guard.0.is_none(),
+            "pid 0 must never arm the guard (kill(0) hits our own group)"
+        );
+        guard.disarm(); // no-op on an unarmed guard
+                        // These are no-ops; if they were not, this test would SIGKILL the
+                        // test runner's own process group.
+        kill_group(0);
+        terminate_group(0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_group_guard_arms_for_real_pids() {
+        let guard = ProcessGroupGuard::new(4242);
+        assert_eq!(guard.0, Some(4242));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn seccomp_program_denies_clone3_with_enosys() {
+        let program = seccomp_program();
+        let pos = program
+            .iter()
+            .position(|i| i.code == 0x15 && i.k == 435)
+            .expect("clone3 syscall check must be present");
+        assert_eq!(program[pos + 1].code, 0x05, "JA skips the ENOSYS return");
+        assert_eq!(program[pos + 2].code, 0x06, "RET");
+        assert_eq!(
+            program[pos + 2].k,
+            0x0005_0026,
+            "clone3 must return ENOSYS so glibc falls back to clone"
+        );
+        // The namespace-flag check for clone(2) is still encoded.
+        assert!(
+            program
+                .iter()
+                .any(|i| i.code == 0x54 && i.k == 0x7E_02_00_80),
+            "clone namespace-flag mask must stay"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn seccomp_flags_check_for_clone_is_reachable() {
+        let program = seccomp_program();
+        #[cfg(target_arch = "x86_64")]
+        const CLONE_NR: u32 = 56;
+        #[cfg(target_arch = "aarch64")]
+        const CLONE_NR: u32 = 220;
+        // The first clone check must be the flags-aware one: JEQ clone → JA →
+        // LD arg0 → AND namespace-mask. A blanket deny before it would make
+        // this unreachable (and break pthread_create's clone fallback).
+        let first = program
+            .iter()
+            .position(|i| i.code == 0x15 && i.k == CLONE_NR)
+            .expect("clone check");
+        assert_eq!(program[first + 1].code, 0x05, "JA skips the flags check");
+        assert_eq!(program[first + 2].code, 0x20, "LD args[0]");
+        assert_eq!(program[first + 3].code, 0x54, "AND namespace mask");
+        assert_eq!(program[first + 3].k, 0x7E_02_00_80);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn seccomp_denies_namespace_unshare_in_legacy_mode() {
+        // python3 >= 3.12 exposes os.unshare; skip where unavailable.
+        let probe = std::process::Command::new("python3")
+            .args(["-c", "import os; os.unshare"])
+            .output();
+        if probe.map(|p| !p.status.success()).unwrap_or(true) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let out = run_allowlisted(
+            &[
+                "python3".to_string(),
+                "-c".to_string(),
+                "import os; os.unshare(os.CLONE_NEWUSER); print('unshared')".to_string(),
+            ],
+            &["python3".to_string()],
+            tmp.path(),
+            tmp.path(),
+            &tmp.path().join("t"),
+            &tmp.path().join("h"),
+            Duration::from_secs(30),
+            "x7",
+            &SandboxRuntime::Legacy,
+        )
+        .await
+        .unwrap();
+        assert_ne!(out.exit_code, Some(0), "unshare must be denied");
+        let stderr = read_capture_tail(&out.stderr_path, 10_000);
+        assert!(
+            stderr.contains("Operation not permitted") || stderr.contains("EPERM"),
+            "expected EPERM from the seccomp filter: {stderr}"
+        );
+        let stdout = read_capture_tail(&out.stdout_path, 1_000);
+        assert!(
+            !stdout.contains("unshared"),
+            "namespace was created: {stdout}"
+        );
     }
 }

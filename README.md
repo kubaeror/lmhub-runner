@@ -240,6 +240,24 @@ guessed. Cost conventions: billed plain input = `input − cacheRead −
 cacheWrite`; `cacheHitRatio = cacheRead / input`; reasoning tokens are
 reported but never billed twice.
 
+### Context management
+
+Before every request the agent loop checks the estimated request size
+(`chars / 4` tokens) against the model's context window from Models.dev,
+always reserving room for the reply (`max_output_tokens`, capped at half the
+window). When a request would not fit it degrades deterministically:
+
+1. **trim** old tool results to `tool_result_max_bytes` (default 8 KB),
+   oldest first;
+2. **drop** the oldest assistant turn and its tool results;
+3. if the task message itself cannot fit, the run fails fast with status
+   `limit_exceeded` and a clear `errors.log` entry instead of sending a
+   doomed request.
+
+Every trim/drop is recorded as a `warning` event naming what was dropped.
+`max_history_tokens` in `config.toml` adds an optional cap on history
+tokens; unset, the budget is derived from the model window.
+
 ## Providers (the full opencode catalog)
 
 The runner ships a bundled snapshot of **models.dev** — all 222 providers
@@ -314,6 +332,9 @@ read_file_max_bytes = 48000
 write_file_max_bytes = 1000000
 sandbox = "auto"              # auto | bwrap | legacy (command isolation backend)
 legacy_commands = "deny"      # deny | allow — run_command without bubblewrap (see Sandbox)
+# max_history_tokens = 60000  # optional cap; unset derives it from the model window
+tool_result_max_bytes = 8192  # trim oversized tool results when over the context budget
+stream_idle_timeout_secs = 120 # stalled SSE stream detection (not a total deadline)
 max_retries = 6
 retry_base_ms = 500
 retry_cap_ms = 30000

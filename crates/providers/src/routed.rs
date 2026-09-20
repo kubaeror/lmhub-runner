@@ -567,14 +567,39 @@ fn is_chat_model(m: &serde_json::Value) -> bool {
 }
 
 impl RoutedProvider {
-    /// Catalog providers are optimistic by default: per-model capability
-    /// flags from Models.dev narrow this down at selection time, and
-    /// unsupported optional params degrade via adapter retries.
+    /// Per-protocol capability truth (AGENTS invariant 2: adapters must not
+    /// over-claim). Per-model flags from Models.dev narrow this further at
+    /// selection time; unsupported optional params still degrade via adapter
+    /// retries, but we never *advertise* a feature the wire cannot carry.
     fn protocol_caps(&self) -> ProviderCaps {
-        ProviderCaps {
-            tool_calls: true,
-            reasoning: true,
-            prompt_caching: true,
+        match self.protocol {
+            // Converse: tools yes; thinking is not sent by our adapter and
+            // prompt caching (cachePoint) is not implemented.
+            ProtocolKind::Bedrock => ProviderCaps {
+                tool_calls: true,
+                reasoning: false,
+                prompt_caching: false,
+            },
+            // Cohere v2: tools yes; reasoning config is not part of the wire.
+            ProtocolKind::Cohere => ProviderCaps {
+                tool_calls: true,
+                reasoning: false,
+                prompt_caching: false,
+            },
+            // Gemini: thinkingConfig is sent; implicit caching is server-side
+            // but nothing in our payload controls it.
+            ProtocolKind::GeminiNative | ProtocolKind::VertexGemini => ProviderCaps {
+                tool_calls: true,
+                reasoning: true,
+                prompt_caching: false,
+            },
+            // OpenAI/Anthropic wires carry all three when the model supports
+            // them; the model's own flags decide at selection time.
+            _ => ProviderCaps {
+                tool_calls: true,
+                reasoning: true,
+                prompt_caching: true,
+            },
         }
     }
 }

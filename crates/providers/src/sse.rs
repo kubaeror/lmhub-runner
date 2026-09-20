@@ -21,9 +21,23 @@ pub(crate) struct SseEvent {
     pub data: String,
 }
 
-/// Transform an HTTP body byte stream into parsed SSE events.
+/// Transform an HTTP body byte stream into parsed SSE events, using the
+/// process-wide idle read timeout (see [`crate::http::init_stream_idle_timeout`]).
 pub(crate) fn sse_events(
     body: impl futures::Stream<Item = reqwest::Result<bytes::Bytes>> + Send + 'static,
+) -> impl futures::Stream<Item = Result<SseEvent>> + Send {
+    sse_events_with_idle(body, crate::http::stream_idle_timeout())
+}
+
+/// [`sse_events`] with an explicit idle timeout: every chunk must arrive
+/// within `idle`, otherwise the stream ends with [`CoreError::Timeout`].
+///
+/// A total-deadline timeout is wrong for SSE (a healthy reasoning stream can
+/// run for minutes); an idle timeout detects the stalled-connection case
+/// without killing slow-but-progressing streams.
+pub(crate) fn sse_events_with_idle(
+    body: impl futures::Stream<Item = reqwest::Result<bytes::Bytes>> + Send + 'static,
+    idle: std::time::Duration,
 ) -> impl futures::Stream<Item = Result<SseEvent>> + Send {
     // bytes is a transitive dependency of reqwest; pin the version we use.
     futures::stream::unfold(
@@ -31,8 +45,12 @@ pub(crate) fn sse_events(
             body: Box::pin(body),
             buf: Vec::new(),
             eof: false,
+            dead: false,
         },
-        |mut state| async move {
+        move |mut state| async move {
+            if state.dead {
+                return None;
+            }
             loop {
                 if let Some(event) = take_event(&mut state.buf) {
                     return Some((event, state));
@@ -45,13 +63,14 @@ pub(crate) fn sse_events(
                     }
                     return None;
                 }
-                match state.body.as_mut().next().await {
-                    Some(Ok(chunk)) => {
+                match tokio::time::timeout(idle, state.body.as_mut().next()).await {
+                    Ok(Some(Ok(chunk))) => {
                         state.buf.extend_from_slice(&chunk);
                         // A server that never sends a blank line must not be
                         // able to grow our buffer without bound.
                         if state.buf.len() > MAX_BUFFERED {
                             state.buf.clear();
+                            state.dead = true;
                             let err = CoreError::Http(
                                 "SSE stream exceeded 4 MiB without a complete event; aborting"
                                     .into(),
@@ -59,12 +78,18 @@ pub(crate) fn sse_events(
                             return Some((Err(err), state));
                         }
                     }
-                    Some(Err(e)) => {
-                        state.eof = true;
+                    Ok(Some(Err(e))) => {
+                        state.dead = true;
                         let err = CoreError::Http(redact_safe(&e.to_string()));
                         return Some((Err(err), state));
                     }
-                    None => state.eof = true,
+                    Ok(None) => state.eof = true,
+                    Err(_elapsed) => {
+                        // No byte within the idle window: the connection is
+                        // stalled — surface a timeout, never a clean finish.
+                        state.dead = true;
+                        return Some((Err(CoreError::Timeout), state));
+                    }
                 }
             }
         },
@@ -78,6 +103,9 @@ struct State {
     body: std::pin::Pin<Box<dyn futures::Stream<Item = reqwest::Result<bytes::Bytes>> + Send>>,
     buf: Vec<u8>,
     eof: bool,
+    /// Terminal failure (idle timeout, transport error, oversized buffer):
+    /// the stream must yield nothing after the error.
+    dead: bool,
 }
 
 fn redact_safe(s: &str) -> String {
@@ -144,6 +172,27 @@ fn inline_error(line: &str) -> Option<String> {
         return None;
     }
     let v: Value = serde_json::from_str(trimmed).ok()?;
+    error_message_from_value(&v)
+}
+
+/// Extract a provider error message from a framed SSE payload, if present.
+///
+/// Handles `{"error": {...}}` and the Anthropic/OpenAI-style
+/// `{"type":"error","error":{...}}` frames; `None` for normal data.
+pub(crate) fn framed_error(v: &Value) -> Option<String> {
+    error_message_from_value(v)
+}
+
+/// Error text for an `event: error` SSE block whose data may not be JSON.
+pub(crate) fn error_from_text(data: &str) -> String {
+    match serde_json::from_str::<Value>(data) {
+        Ok(v) => error_message_from_value(&v)
+            .unwrap_or_else(|| format!("stream error: {}", redact_safe(&truncate(data)))),
+        Err(_) => format!("stream error: {}", redact_safe(&truncate(data))),
+    }
+}
+
+fn error_message_from_value(v: &Value) -> Option<String> {
     let err = v.get("error")?;
     let msg = err
         .get("message")
@@ -153,6 +202,11 @@ fn inline_error(line: &str) -> Option<String> {
             err.get("type")
                 .and_then(|t| t.as_str())
                 .map(|t| format!("provider error: {t}"))
+        })
+        .or_else(|| {
+            v.pointer("/message")
+                .and_then(|m| m.as_str())
+                .map(String::from)
         })
         .unwrap_or_else(|| "provider returned an error object".to_string());
     Some(redact_safe(&truncate(&msg)))
@@ -289,5 +343,60 @@ mod tests {
     fn json_parse_error_is_parse_kind() {
         let err = parse_json("nope").unwrap_err();
         assert!(matches!(err, CoreError::Parse(_)));
+    }
+
+    #[tokio::test]
+    async fn idle_stall_ends_with_timeout_and_no_further_events() {
+        use std::time::Duration;
+        // First chunk immediately, then a 3 s stall (idle window 200 ms).
+        let body = futures::stream::unfold(0u8, |n| async move {
+            match n {
+                0 => Some((
+                    Ok::<_, reqwest::Error>(bytes::Bytes::from("data: one\n\n")),
+                    1,
+                )),
+                1 => {
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    Some((
+                        Ok::<_, reqwest::Error>(bytes::Bytes::from("data: two\n\n")),
+                        2,
+                    ))
+                }
+                _ => None,
+            }
+        });
+        let mut events = Box::pin(sse_events_with_idle(body, Duration::from_millis(200)));
+        let first = events.next().await.unwrap().unwrap();
+        assert_eq!(first.data, "one");
+        let second = events.next().await.unwrap().unwrap_err();
+        assert!(matches!(second, CoreError::Timeout), "{second:?}");
+        assert!(
+            events.next().await.is_none(),
+            "a stalled stream must not emit anything after the timeout"
+        );
+    }
+
+    #[tokio::test]
+    async fn slow_but_progressing_stream_survives_idle_timeout() {
+        use std::time::Duration;
+        // Four chunks, each 150 ms apart, with a 1 s idle window: total
+        // duration exceeds the window, but no single gap does.
+        let body = futures::stream::iter(0..4).then(|i| async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            Ok::<_, reqwest::Error>(bytes::Bytes::from(format!("data: {i}\n\n")))
+        });
+        let events: Vec<Result<SseEvent>> = sse_events_with_idle(body, Duration::from_secs(1))
+            .collect()
+            .await;
+        let data: Vec<&str> = events
+            .iter()
+            .map(|e| {
+                e.as_ref()
+                    .expect("no error on a progressing stream")
+                    .data
+                    .as_str()
+            })
+            .collect();
+        assert_eq!(data, vec!["0", "1", "2", "3"]);
     }
 }

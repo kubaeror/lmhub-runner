@@ -37,6 +37,12 @@ pub struct RunSpec {
     pub enable_prompt_cache: bool,
     pub max_turns: u32,
     pub max_output_tokens: u32,
+    /// Operator cap on history tokens (AppConfig `max_history_tokens`);
+    /// `None` derives the budget from the model context window.
+    pub max_history_tokens: Option<u64>,
+    /// Tool results larger than this are trimmed (oldest first) when the
+    /// context budget is exceeded (AppConfig `tool_result_max_bytes`).
+    pub tool_result_max_bytes: u64,
     pub deadline: Duration,
     pub cancel: CancellationToken,
     pub sandbox: SandboxConfig,
@@ -164,6 +170,18 @@ pub async fn execute(
                 ),
             );
             (RunStatus::Timeout, None)
+        }
+        Ok(Err(e @ CoreError::LimitExceeded(_))) => {
+            // Budget refusal is a distinct terminal state, not a provider
+            // error: the operator can act on it (smaller task / bigger model).
+            sink.core_error(
+                &e,
+                &format!(
+                    "context budget refused the request (model={}, reasoning={})",
+                    spec.model.id, reasoning_str
+                ),
+            );
+            (RunStatus::LimitExceeded, None)
         }
         Ok(Err(e)) => {
             sink.core_error(
@@ -308,6 +326,18 @@ async fn run_loop(
     reasoning: ReasoningLevel,
 ) -> Result<LoopExit, CoreError> {
     let mut messages: Vec<ChatMessage> = vec![ChatMessage::user(spec.task.clone())];
+    let tools = tool_specs();
+
+    // Context budget: models.dev window (when known) minus the output
+    // reserve; the operator may cap history further in config.
+    let budget = spec
+        .model
+        .context_window
+        .map(|window| crate::budget::ContextBudget {
+            context_window: window,
+            max_history_tokens: spec.max_history_tokens,
+            tool_result_max_bytes: spec.tool_result_max_bytes,
+        });
 
     // The static prompt cannot know the configured command allowlist; append
     // the effective list (and path rules) so the model never guesses what
@@ -321,8 +351,20 @@ async fn run_loop(
         }
         sink.emit(&RunEvent::TurnStarted { ts: now_ts(), turn });
 
+        if let Some(budget) = &budget {
+            let warnings = budget.enforce(
+                &system_prompt,
+                &tools,
+                &mut messages,
+                spec.max_output_tokens as u64,
+            )?;
+            for warning in warnings {
+                sink.warning(&warning);
+            }
+        }
+
         let request = ChatRequest::new(spec.model.id.clone(), system_prompt.clone())
-            .with_tools(tool_specs())
+            .with_tools(tools.clone())
             .with_messages(messages.clone())
             .with_reasoning(reasoning)
             .with_max_tokens(spec.max_output_tokens)

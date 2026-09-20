@@ -17,7 +17,29 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const GET_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Default idle read timeout for streaming bodies: a stream that produces no
+/// byte for this long is dead, even though a long *total* stream is fine.
+pub const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+
+static STREAM_IDLE_TIMEOUT: OnceLock<Duration> = OnceLock::new();
+
+/// Install the process-wide streaming idle timeout (main wires it from
+/// `AppConfig::stream_idle_timeout_secs`). Clamped to >= 1 s.
+pub fn init_stream_idle_timeout(idle: Duration) {
+    let idle = idle.max(Duration::from_secs(1));
+    if STREAM_IDLE_TIMEOUT.set(idle).is_err() {
+        tracing::warn!("init_stream_idle_timeout called twice; second value ignored");
+    }
+}
+
+pub(crate) fn stream_idle_timeout() -> Duration {
+    *STREAM_IDLE_TIMEOUT
+        .get()
+        .unwrap_or(&DEFAULT_STREAM_IDLE_TIMEOUT)
+}
 
 /// Backoff policy (loaded from AppConfig at startup).
 #[derive(Debug, Clone, Copy)]
@@ -109,26 +131,45 @@ async fn sleep(duration: Duration) {
 /// Send one HTTP request with retry-on-transient semantics.
 /// Returns the final `Response` (success OR exhausted non-retryable error —
 /// callers turn those into their domain errors exactly as before).
+///
+/// `timeout` is a total request deadline (non-streaming calls). Streaming
+/// callers pass `None`: a total timeout would kill healthy long streams, so
+/// only connect establishment is bounded here — the body is governed by the
+/// idle read timeout in the SSE parser.
 pub(crate) async fn send_request(
     http: &Client,
     method: reqwest::Method,
     url: &str,
     headers: Vec<(String, String)>,
     body: Option<String>,
-    timeout: Duration,
+    timeout: Option<Duration>,
 ) -> Result<reqwest::Response> {
     let policy = policy();
     let header_map = to_header_map(headers)?;
 
     for attempt in 0..policy.max_attempts {
-        let mut req = http.request(method.clone(), url).timeout(timeout);
-        req = req.headers(header_map.clone());
+        let mut req = http
+            .request(method.clone(), url)
+            .headers(header_map.clone());
         if let Some(body) = &body {
             req = req.body(body.clone());
         }
+        if let Some(t) = timeout {
+            req = req.timeout(t);
+        }
 
-        match req.send().await {
-            Ok(resp) => {
+        // reqwest 0.13 has no per-request connect timeout, so streaming
+        // requests (no total deadline) bound `send()` — headers only, the
+        // body stays streamed — with a tokio timer.
+        let send_result = match timeout {
+            Some(_) => Ok(req.send().await),
+            None => tokio::time::timeout(CONNECT_TIMEOUT, req.send())
+                .await
+                .map_err(|_| ()),
+        };
+
+        match send_result {
+            Ok(Ok(resp)) => {
                 let status = resp.status();
                 if status.is_success() || !retryable_status(status.as_u16()) {
                     return Ok(resp);
@@ -172,7 +213,7 @@ pub(crate) async fn send_request(
                     ),
                 });
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 let transport_transient =
                     e.is_connect() || e.is_timeout() || e.is_request() || e.is_body();
                 if transport_transient && attempt + 1 < policy.max_attempts {
@@ -187,6 +228,20 @@ pub(crate) async fn send_request(
                     continue;
                 }
                 return Err(CoreError::Http(scrub_err(&e)));
+            }
+            Err(()) => {
+                // Streaming connect/handshake deadline hit.
+                if attempt + 1 < policy.max_attempts {
+                    let delay = next_delay(attempt, None, None, &policy).unwrap_or(policy.cap);
+                    tracing::warn!(
+                        url = %redact::scrub(url),
+                        attempt = attempt + 1,
+                        "stream connect timed out; retrying"
+                    );
+                    sleep(jitter(delay)).await;
+                    continue;
+                }
+                return Err(CoreError::Timeout);
             }
         }
     }
@@ -221,7 +276,7 @@ pub(crate) async fn post_json(
         url,
         headers,
         Some(payload),
-        REQUEST_TIMEOUT,
+        Some(REQUEST_TIMEOUT),
     )
     .await?;
     take_json(resp).await
@@ -233,28 +288,29 @@ pub(crate) async fn get_json(
     url: &str,
     headers: Vec<(String, String)>,
 ) -> Result<Value> {
-    let resp = send_request(http, reqwest::Method::GET, url, headers, None, GET_TIMEOUT).await?;
+    let resp = send_request(
+        http,
+        reqwest::Method::GET,
+        url,
+        headers,
+        None,
+        Some(GET_TIMEOUT),
+    )
+    .await?;
     take_json(resp).await
 }
 
 /// POST expecting a streaming (SSE/binary) response body.
 /// Retries cover connection establishment + status; the body must be read
-/// by the caller (retries never apply once streaming started).
+/// by the caller (retries never apply once streaming started). No total
+/// deadline: the body is governed by the idle read timeout instead.
 pub(crate) async fn post_stream(
     http: &Client,
     url: &str,
     headers: Vec<(String, String)>,
     body: String,
 ) -> Result<reqwest::Response> {
-    send_request(
-        http,
-        reqwest::Method::POST,
-        url,
-        headers,
-        Some(body),
-        REQUEST_TIMEOUT,
-    )
-    .await
+    send_request(http, reqwest::Method::POST, url, headers, Some(body), None).await
 }
 
 async fn take_json(resp: reqwest::Response) -> Result<Value> {

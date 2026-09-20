@@ -329,6 +329,36 @@ mod tests {
             Some(ReasoningLevel::Low)
         );
     }
+
+    #[test]
+    fn suggested_level_ignores_substring_false_positives() {
+        // These words contain level names as substrings; whole-token
+        // matching must not treat them as suggestions.
+        for msg in [
+            "the api key is allowed",
+            "the model offered no choices",
+            "maximum context is below the limit",
+            "slow response",
+            "reasoning_effort: maximum",
+        ] {
+            assert_eq!(suggested_reasoning_level(msg), None, "{msg}");
+        }
+        // Real suggestions still parse (Vertex wording).
+        assert_eq!(
+            suggested_reasoning_level(
+                "This model always engages in thinking and cannot be disabled; please use low, high, or max"
+            ),
+            Some(ReasoningLevel::Low)
+        );
+        assert_eq!(
+            suggested_reasoning_level("thinkingBudget must be 0 or off"),
+            Some(ReasoningLevel::Off)
+        );
+        assert_eq!(
+            suggested_reasoning_level("set reasoning_effort to medium"),
+            Some(ReasoningLevel::Medium)
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -454,7 +484,9 @@ impl OpenAiStreamAccumulator {
         {
             self.stop_reason = Some(map_finish_reason(reason));
         }
-        if let Some(u) = chunk.get("usage").filter(|u| u.is_object()) {
+        // Some gateways append `"usage": {}` chunks; an empty object must not
+        // zero real usage reported earlier in the stream.
+        if let Some(u) = chunk.get("usage").filter(|u| usage_has_token_fields(u)) {
             self.usage = parse_usage(u);
         }
         delta_out
@@ -580,6 +612,22 @@ mod stream_tests {
         let err = OpenAiStreamAccumulator::new().finish(1).unwrap_err();
         assert!(matches!(err, CoreError::Parse(_)));
     }
+
+    #[test]
+    fn empty_usage_object_does_not_zero_real_usage() {
+        let mut acc = OpenAiStreamAccumulator::new();
+        acc.feed(&json!({
+            "choices": [{"delta": {"content": "hi"}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5}
+        }));
+        // Some gateways follow with an empty usage object; it must not
+        // overwrite the real counts.
+        acc.feed(&json!({"choices": [{"delta": {}}], "usage": {}}));
+        let resp = acc.finish(1).unwrap();
+        assert_eq!(resp.usage.input_tokens, 10);
+        assert_eq!(resp.usage.output_tokens, 5);
+        assert_eq!(resp.text, "hi");
+    }
 }
 
 /// Broad reasoning-rejection detection: a 4xx explaining that the request's
@@ -612,22 +660,39 @@ pub fn is_reasoning_rejection(msg: &str) -> bool {
 
 /// First concrete reasoning level a rejection message suggests, e.g.
 /// "please use low, high, or max" → Low. `None` when the message names no
-/// level. The earliest level named in the message wins.
+/// level.
+///
+/// Matching is on whole tokens (split on non-alphanumerics): substring
+/// matches inside `allowed`, `offered`, `maximum`, `below` or `slow` must
+/// not be read as levels. The earliest named token wins.
 pub fn suggested_reasoning_level(msg: &str) -> Option<ReasoningLevel> {
-    let m = msg.to_ascii_lowercase();
-    const LADDER: [(&str, ReasoningLevel); 8] = [
-        ("xhigh", ReasoningLevel::XHigh),
-        ("minimal", ReasoningLevel::Minimal),
-        ("medium", ReasoningLevel::Medium),
-        ("high", ReasoningLevel::High),
-        ("max", ReasoningLevel::Max),
-        ("low", ReasoningLevel::Low),
-        ("none", ReasoningLevel::Off),
-        ("off", ReasoningLevel::Off),
+    for token in msg.split(|c: char| !c.is_alphanumeric()) {
+        let level = match token.to_ascii_lowercase().as_str() {
+            "xhigh" => ReasoningLevel::XHigh,
+            "minimal" => ReasoningLevel::Minimal,
+            "medium" => ReasoningLevel::Medium,
+            "high" => ReasoningLevel::High,
+            // "maximum" is its own token and intentionally not a level name:
+            // rejecting it avoids the old substring false positive.
+            "max" => ReasoningLevel::Max,
+            "low" => ReasoningLevel::Low,
+            "none" | "off" => ReasoningLevel::Off,
+            _ => continue,
+        };
+        return Some(level);
+    }
+    None
+}
+
+/// True when a usage object actually carries token counts (guards against
+/// `"usage": {}` chunks zeroing real usage).
+fn usage_has_token_fields(u: &Value) -> bool {
+    const FIELDS: &[&str] = &[
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "prompt_tokens_details",
+        "completion_tokens_details",
     ];
-    LADDER
-        .iter()
-        .filter_map(|(needle, lvl)| m.find(needle).map(|pos| (pos, *lvl)))
-        .min_by_key(|(pos, _)| *pos)
-        .map(|(_, lvl)| lvl)
+    u.is_object() && FIELDS.iter().any(|f| u.get(*f).is_some())
 }

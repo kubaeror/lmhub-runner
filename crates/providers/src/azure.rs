@@ -85,8 +85,8 @@ pub async fn chat(
     }
 }
 
-/// A 4xx whose body names `tools`/`reasoning_effort` means the deployment
-/// rejects the optional params — retry once without them.
+/// A 4xx whose body names `tools`/`reasoning_effort`/`max_completion_tokens`
+/// means the deployment rejects the optional params — retry once accordingly.
 async fn degrade_if_rejected(
     http_client: &reqwest::Client,
     err: &CoreError,
@@ -94,18 +94,42 @@ async fn degrade_if_rejected(
     url: &str,
     headers: &[(String, String)],
 ) -> Option<ChatResponse> {
-    if let CoreError::Provider(msg) = err {
-        let lower = msg.to_ascii_lowercase();
-        if lower.contains("tools") || lower.contains("reasoning_effort") {
-            return degrade_once(
-                http_client,
-                request,
-                url,
-                headers,
-                "deployment rejected optional params; retried without them",
-            )
-            .await;
-        }
+    let CoreError::Provider(msg) = err else {
+        return None;
+    };
+    let lower = msg.to_ascii_lowercase();
+    if lower.contains("max_completion_tokens") {
+        // Older deployments still want `max_tokens`; keep tools/reasoning.
+        let mut payload = wire_openai::build_chat_payload(
+            request,
+            OpenAiWireOpts {
+                include_reasoning_effort: true,
+            },
+        );
+        wire_openai::use_max_tokens_field(&mut payload);
+        let started = Instant::now();
+        let body = http::post_json(http_client, url, headers.to_vec(), &payload)
+            .await
+            .ok()?;
+        return wire_openai::parse_chat_response(
+            &body,
+            started.elapsed().as_millis() as u64,
+            vec![
+                "deployment rejected `max_completion_tokens`; retried with `max_tokens`"
+                    .to_string(),
+            ],
+        )
+        .ok();
+    }
+    if lower.contains("tools") || lower.contains("reasoning_effort") {
+        return degrade_once(
+            http_client,
+            request,
+            url,
+            headers,
+            "deployment rejected optional params; retried without them",
+        )
+        .await;
     }
     None
 }
@@ -197,5 +221,42 @@ mod tests {
         assert_eq!(p["model"], serde_json::json!("gpt-5.1"));
         assert_eq!(p["messages"][0]["role"], serde_json::json!("system"));
         let _ = ReasoningLevel::Off;
+    }
+
+    #[tokio::test]
+    async fn max_completion_tokens_is_retried_as_max_tokens() {
+        use crate::wire_test_util::two_shot_server;
+        let reject = serde_json::json!({
+            "error": {"type": "invalid_request_error",
+                      "message": "Unsupported parameter: 'max_completion_tokens' is not supported. Use 'max_tokens' instead."}
+        })
+        .to_string();
+        let ok = serde_json::json!({
+            "id": "x",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"},
+                         "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        })
+        .to_string();
+        let (base, rx) = two_shot_server(400, reject, ok).await;
+
+        let mut req = ChatRequest::new("gpt-4o", "sys");
+        req.messages.push(ChatMessage::user("hi"));
+        let resp = chat(&reqwest::Client::new(), &base, "key-1234567890", &req)
+            .await
+            .unwrap();
+        assert_eq!(resp.text, "ok");
+        assert!(
+            resp.warnings.iter().any(|w| w.contains("max_tokens")),
+            "fallback must be recorded: {:?}",
+            resp.warnings
+        );
+
+        let (first, second) = rx.await.unwrap();
+        assert!(first.contains("max_completion_tokens"), "{first}");
+        assert!(
+            second.contains("max_tokens") && !second.contains("max_completion_tokens"),
+            "retry must rename the field: {second}"
+        );
     }
 }

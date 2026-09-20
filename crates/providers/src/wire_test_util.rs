@@ -60,6 +60,41 @@ pub(crate) async fn one_shot_server(
     (format!("http://{addr}/v1"), rx)
 }
 
+/// Two sequential requests: the first answers with `first_status`/`first_body`,
+/// the second with 200/`second_body`. Returns both raw requests.
+pub(crate) async fn two_shot_server(
+    first_status: u16,
+    first_body: String,
+    second_body: String,
+) -> (String, tokio::sync::oneshot::Receiver<(String, String)>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for (i, (status, body)) in [(first_status, first_body), (200u16, second_body)]
+            .into_iter()
+            .enumerate()
+        {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            requests.push(read_http_request(&mut sock).await);
+            let reason = if status == 200 { "OK" } else { "Error" };
+            let response = format!(
+                "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            sock.write_all(response.as_bytes()).await.unwrap();
+            if i == 1 {
+                break;
+            }
+        }
+        let first = requests.remove(0);
+        let second = requests.remove(0);
+        let _ = tx.send((first, second));
+    });
+    (format!("http://{addr}/v1"), rx)
+}
+
 async fn read_http_request(sock: &mut tokio::net::TcpStream) -> String {
     let mut buf: Vec<u8> = Vec::new();
     let mut byte = [0u8; 1];

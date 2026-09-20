@@ -145,7 +145,7 @@ impl Provider for NativeAnthropicProvider {
                     r
                 })
             }
-            Err(CoreError::Provider(msg)) if is_tools_rejection(&msg) => {
+            Err(CoreError::Provider(msg)) if crate::wire_common::is_tools_rejection(&msg) => {
                 warnings.push("provider rejected `tools`; retried without tools".into());
                 let mut stripped = request.clone();
                 stripped.tools.clear();
@@ -182,11 +182,6 @@ impl Provider for NativeAnthropicProvider {
 fn is_thinking_rejection(msg: &str) -> bool {
     let m = msg.to_ascii_lowercase();
     m.contains("thinking") && (m.contains("unsupported") || m.contains("not supported"))
-}
-
-fn is_tools_rejection(msg: &str) -> bool {
-    let m = msg.to_ascii_lowercase();
-    m.contains("'tools'") || (m.contains("tools") && m.contains("unsupported"))
 }
 
 #[cfg(test)]

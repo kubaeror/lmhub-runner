@@ -14,7 +14,7 @@ use lmhub_modelsdev::CatalogSnapshot;
 use lmhub_providers::ProviderRegistry;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc::UnboundedSender;
@@ -198,7 +198,7 @@ pub struct SetupState {
 }
 
 /// Preferences persisted to `ui.json` next to the config.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SessionPrefs {
     pub last_provider: Option<String>,
@@ -214,23 +214,89 @@ pub struct SessionPrefs {
     pub max_concurrent_runs: usize,
 }
 
+impl Default for SessionPrefs {
+    /// A fresh install allows two concurrent runs (the old `load` special
+    /// case); the serde container default uses this too.
+    fn default() -> Self {
+        Self {
+            last_provider: None,
+            last_model: None,
+            last_reasoning: None,
+            last_prompt: None,
+            last_task_prompt: None,
+            favorites: BTreeSet::new(),
+            model_defaults: std::collections::BTreeMap::new(),
+            max_concurrent_runs: 2,
+        }
+    }
+}
+
 impl SessionPrefs {
-    pub fn load(path: &PathBuf) -> Self {
+    /// Load prefs, clamping values that cannot work. The optional string is
+    /// a user-facing notice when a value had to be corrected.
+    pub fn load(path: &Path) -> (Self, Option<String>) {
         let mut prefs: SessionPrefs = std::fs::read_to_string(path)
             .ok()
             .and_then(|raw| serde_json::from_str(&raw).ok())
             .unwrap_or_default();
-        if prefs.max_concurrent_runs == 0 {
-            prefs.max_concurrent_runs = 2;
-        }
-        prefs
+        let before = prefs.max_concurrent_runs;
+        prefs.sanitize();
+        let notice = (prefs.max_concurrent_runs != before).then(|| {
+            format!(
+                "max_concurrent_runs {before} clamped to {}",
+                prefs.max_concurrent_runs
+            )
+        });
+        (prefs, notice)
     }
-    pub fn save(&self, path: &PathBuf) {
-        if let Ok(json) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(path, json);
+
+    /// Clamp `max_concurrent_runs` to 1..=64 (also guards hand-edited
+    /// ui.json); warns so the correction is visible in the log.
+    pub fn sanitize(&mut self) {
+        let clamped = self
+            .max_concurrent_runs
+            .clamp(MIN_CONCURRENT_RUNS, MAX_CONCURRENT_RUNS);
+        if clamped != self.max_concurrent_runs {
+            tracing::warn!(
+                config = "max_concurrent_runs",
+                from = self.max_concurrent_runs,
+                to = clamped,
+                "ui.json value clamped"
+            );
+            self.max_concurrent_runs = clamped;
+        }
+    }
+
+    /// Persist atomically (`.tmp` + rename), creating the config dir on a
+    /// fresh install. Failures are logged, never fatal.
+    pub fn save(&self, path: &Path) {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    tracing::warn!(
+                        path = %parent.display(),
+                        error = %e,
+                        "could not create config directory for ui.json"
+                    );
+                    return;
+                }
+            }
+        }
+        match serde_json::to_vec_pretty(self) {
+            Ok(mut json) => {
+                json.push(b'\n');
+                if let Err(e) = lmhub_core::util::write_atomic(path, &json) {
+                    tracing::warn!(path = %path.display(), error = %e, "could not write ui.json");
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "could not serialize ui.json"),
         }
     }
 }
+
+/// Bounds for `max_concurrent_runs` (also applied to hand-edited ui.json).
+pub const MIN_CONCURRENT_RUNS: usize = 1;
+pub const MAX_CONCURRENT_RUNS: usize = 64;
 
 #[derive(Default)]
 pub struct HistoryState {
@@ -288,7 +354,7 @@ impl State {
             .parent()
             .map(|p| p.join("ui.json"))
             .unwrap_or_else(|| ctx.config_path.clone());
-        let prefs = SessionPrefs::load(&prefs_path);
+        let (prefs, prefs_notice) = SessionPrefs::load(&prefs_path);
 
         let prompt_idx = ctx
             .config
@@ -359,6 +425,9 @@ impl State {
             .and_then(lmhub_core::ReasoningLevel::parse_effort)
         {
             state.setup.reasoning = lvl;
+        }
+        if let Some(notice) = prefs_notice {
+            state.push_notice(notice);
         }
         state
     }
@@ -752,5 +821,64 @@ pub fn fold_run_event(state: &mut State, run_id: u64, ev: RunEvent) {
         RunEvent::Error { .. } | RunEvent::SandboxViolation { .. } => run.errors += 1,
         RunEvent::Warning { .. } => run.warnings += 1,
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod prefs_tests {
+    use super::*;
+
+    #[test]
+    fn prefs_round_trip_in_a_missing_config_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("config").join("ui.json");
+        assert!(
+            !path.parent().unwrap().exists(),
+            "parent must not exist yet"
+        );
+
+        let prefs = SessionPrefs {
+            max_concurrent_runs: 3,
+            last_provider: Some("openai".into()),
+            ..Default::default()
+        };
+        prefs.save(&path);
+        assert!(path.is_file(), "ui.json must be created, parents included");
+        assert!(
+            !path.with_file_name("ui.json.tmp").exists(),
+            "no temp file may be left behind"
+        );
+
+        let (loaded, notice) = SessionPrefs::load(&path);
+        assert_eq!(loaded.max_concurrent_runs, 3);
+        assert_eq!(loaded.last_provider.as_deref(), Some("openai"));
+        assert!(notice.is_none());
+    }
+
+    #[test]
+    fn prefs_clamp_absurd_concurrency_with_a_notice() {
+        let mut prefs = SessionPrefs {
+            max_concurrent_runs: 0,
+            ..Default::default()
+        };
+        prefs.sanitize();
+        assert_eq!(prefs.max_concurrent_runs, MIN_CONCURRENT_RUNS);
+
+        prefs.max_concurrent_runs = 9_999;
+        prefs.sanitize();
+        assert_eq!(prefs.max_concurrent_runs, MAX_CONCURRENT_RUNS);
+
+        // Through load(): malformed value yields a user-facing notice.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ui.json");
+        std::fs::write(&path, r#"{"max_concurrent_runs": 0}"#).unwrap();
+        let (loaded, notice) = SessionPrefs::load(&path);
+        assert_eq!(loaded.max_concurrent_runs, MIN_CONCURRENT_RUNS);
+        assert!(notice.is_some(), "clamping must be visible to the user");
+    }
+
+    #[test]
+    fn prefs_default_is_a_sane_two() {
+        assert_eq!(SessionPrefs::default().max_concurrent_runs, 2);
     }
 }

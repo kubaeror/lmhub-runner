@@ -16,6 +16,20 @@ pub fn truncate_chars(s: &str, max_chars: usize) -> String {
     format!("{head}…")
 }
 
+/// Truncate `s` to at most `max_bytes` bytes on a UTF-8 boundary, appending
+/// an ellipsis when cut. The result can exceed `max_bytes` by the 3-byte
+/// marker; callers budget for that.
+pub fn truncate_bytes(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &s[..end])
+}
+
 /// Write `contents` to `path` atomically: temp file in the same directory,
 /// fsync, then rename. Readers never observe a half-written document.
 ///
@@ -64,6 +78,16 @@ mod tests {
         assert_eq!(short, "héllo");
         let exact = truncate_chars("abcde", 5);
         assert_eq!(exact, "abcde");
+    }
+
+    #[test]
+    fn truncate_bytes_respects_utf8_boundaries() {
+        let s = format!("{}🦀", "a".repeat(10));
+        let out = truncate_bytes(&s, 11); // 11 lands inside the 4-byte emoji
+        assert_eq!(out, "aaaaaaaaaa…");
+        assert_eq!(truncate_bytes("héllo", 6), "héllo"); // 6 bytes exactly
+        assert_eq!(truncate_bytes("héllo", 2), "h…");
+        assert_eq!(truncate_bytes("héllo", 0), "…");
     }
 
     #[test]
