@@ -95,15 +95,15 @@ fn model_row(model: &MapModel, state: &State) -> Line<'static> {
         Style::default(),
     )];
     let levels = effective_levels(model);
-    let default = state.prefs.model_defaults.get(&model.model_id);
+    let default = state.default_reasoning_for(&model.provider_id, &model.model_id);
     for level in &levels {
         let mut label = level.as_str().to_string();
-        if default == Some(level) {
+        if default.as_ref() == Some(level) {
             label.push('★');
         }
         spans.push(Span::styled(
             format!(" {label}"),
-            Style::default().fg(if default == Some(level) {
+            Style::default().fg(if default.as_ref() == Some(level) {
                 Color::Yellow
             } else {
                 Color::Gray

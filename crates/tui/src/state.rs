@@ -147,6 +147,35 @@ pub struct RunRegistry {
     pub next_id: u64,
 }
 
+/// Finished sessions kept in memory for rerun/inspection before pruning.
+pub const MAX_FINISHED_SESSIONS: usize = 50;
+
+impl RunRegistry {
+    /// Keep the completed backlog bounded. Running/pending sessions are
+    /// never dropped; the selection follows its session when possible.
+    pub fn prune_finished(&mut self, keep_finished: usize) {
+        let finished: Vec<u64> = self
+            .runs
+            .iter()
+            .filter(|r| r.status == RunSessionStatus::Finished)
+            .map(|r| r.id)
+            .collect();
+        if finished.len() <= keep_finished {
+            return;
+        }
+        let drop: std::collections::HashSet<u64> = finished[..finished.len() - keep_finished]
+            .iter()
+            .copied()
+            .collect();
+        let selected_id = self.selected_run().map(|r| r.id);
+        self.runs.retain(|r| !drop.contains(&r.id));
+        self.selected = selected_id
+            .and_then(|id| self.runs.iter().position(|r| r.id == id))
+            .unwrap_or(0)
+            .min(self.runs.len().saturating_sub(1));
+    }
+}
+
 impl RunSession {
     /// Elapsed wall time, frozen once the run reached a terminal state.
     pub fn elapsed(&self) -> std::time::Duration {
@@ -182,6 +211,13 @@ pub struct SetupState {
     pub focus: Pane,
     /// Index into the non-header rows of [`State::provider_rows`].
     pub provider_idx: usize,
+    /// Provider id the current model list belongs to. Ids (not indexes)
+    /// survive filtering/reordering: `setup.models` is only ever valid for
+    /// this provider.
+    pub selected_provider_id: Option<String>,
+    /// Model id to re-seat once the next catalog arrives (keeps the user's
+    /// place across `r`/F5 reloads and provider round-trips).
+    pub restore_model_id: Option<String>,
     /// Live provider search text; empty = browse mode with group headers.
     pub provider_filter: EditField,
     /// Models of the currently selected provider.
@@ -220,7 +256,9 @@ pub struct SessionPrefs {
     pub last_task_prompt: Option<String>,
     #[serde(skip_serializing_if = "BTreeSet::is_empty")]
     pub favorites: BTreeSet<String>,
-    /// Per-model default reasoning level (model id → level).
+    /// Per-route default reasoning level, keyed `provider_id/model_id`
+    /// (older `ui.json` files stored bare model ids; those are migrated on
+    /// load).
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub model_defaults: std::collections::BTreeMap<String, ReasoningLevel>,
     pub max_concurrent_runs: usize,
@@ -253,6 +291,7 @@ impl SessionPrefs {
             .unwrap_or_default();
         let before = prefs.max_concurrent_runs;
         prefs.sanitize();
+        prefs.migrate_legacy_model_defaults();
         let notice = (prefs.max_concurrent_runs != before).then(|| {
             format!(
                 "max_concurrent_runs {before} clamped to {}",
@@ -276,6 +315,30 @@ impl SessionPrefs {
                 "ui.json value clamped"
             );
             self.max_concurrent_runs = clamped;
+        }
+    }
+
+    /// Older `ui.json` files keyed `model_defaults` by bare model id. With
+    /// per-route keys (`provider/model`) those can only be attributed to the
+    /// last selected provider; unattributable entries are dropped rather than
+    /// guessed.
+    fn migrate_legacy_model_defaults(&mut self) {
+        let legacy: Vec<(String, ReasoningLevel)> = self
+            .model_defaults
+            .iter()
+            .filter(|(k, _)| !k.contains('/'))
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+        if legacy.is_empty() {
+            return;
+        }
+        let provider = self.last_provider.clone();
+        for (model, level) in legacy {
+            self.model_defaults.remove(&model);
+            if let Some(pid) = &provider {
+                tracing::debug!(provider = %pid, model = %model, "migrated model default to per-route key");
+                self.model_defaults.insert(format!("{pid}/{model}"), level);
+            }
         }
     }
 
@@ -512,6 +575,13 @@ impl State {
     }
 
     pub fn selected_provider(&self) -> Option<Arc<dyn Provider>> {
+        // Id first: the row index is display/cursor state and may point at a
+        // different provider after filtering.
+        if let Some(id) = self.setup.selected_provider_id.as_deref() {
+            if let Some(p) = self.registry.get(id) {
+                return Some(p);
+            }
+        }
         let row = self.selected_provider_row()?;
         self.registry.all().get(row.registry_idx).cloned()
     }
@@ -529,20 +599,27 @@ impl State {
 
     /// The effective reasoning level for the selected model: its pinned
     /// per-model default when one is set, otherwise the user's last chosen
-    /// level — clamped to what the model actually offers (its first level
-    /// when the choice is unsupported — never a hard fallback to off).
-    /// Mirrors [`Self::bulk_reasoning_for`] so single and bulk runs agree.
+    /// level — clamped to what the model actually offers (nearest supported
+    /// level, never a hard fallback to off). Mirrors
+    /// [`Self::bulk_reasoning_for`] so single and bulk runs agree.
     pub fn selected_reasoning(&self) -> ReasoningLevel {
-        let level = self
-            .selected_model()
-            .and_then(|m| self.default_reasoning_for(&m.id))
-            .unwrap_or(self.setup.reasoning);
-        let levels = self.visible_reasoning_levels();
-        if levels.contains(&level) {
-            level
-        } else {
-            levels.first().copied().unwrap_or(ReasoningLevel::Off)
+        let pinned = self
+            .selected_provider_id()
+            .zip(self.selected_model().map(|m| m.id.clone()))
+            .and_then(|(pid, mid)| self.default_reasoning_for(&pid, &mid));
+        let level = pinned.unwrap_or(self.setup.reasoning);
+        match self.selected_model() {
+            Some(m) => level.clamp_to(Some(&levels_for(m))),
+            None => level,
         }
+    }
+
+    /// The id of the provider the model list currently belongs to.
+    pub fn selected_provider_id(&self) -> Option<String> {
+        self.setup
+            .selected_provider_id
+            .clone()
+            .or_else(|| self.selected_provider().map(|p| p.id().to_string()))
     }
 
     /// Re-seat the reasoning display for the current model: a pinned
@@ -551,14 +628,17 @@ impl State {
     /// (`setup.reasoning`) is never modified here — it stays the model-
     /// independent fallback for bulk runs — only `reasoning_idx` moves.
     pub fn snap_reasoning_to_default(&mut self) {
-        let Some(model) = self.selected_model() else {
+        let Some(model) = self.selected_model().map(|m| m.id.clone()) else {
             return;
         };
         let levels = self.visible_reasoning_levels();
         // A freshly selected model with a pinned default seats the display
         // on it (the effective level comes from `selected_reasoning` and
         // `bulk_reasoning_for`, never by clobbering the chosen level).
-        if let Some(level) = self.prefs.model_defaults.get(&model.id).copied() {
+        let pinned = self
+            .selected_provider_id()
+            .and_then(|pid| self.default_reasoning_for(&pid, &model));
+        if let Some(level) = pinned {
             if let Some(idx) = levels.iter().position(|l| *l == level) {
                 self.setup.reasoning_idx = idx;
                 return;
@@ -572,10 +652,36 @@ impl State {
         }
     }
 
-    /// The default reasoning for a model, when set. `None` = model default
-    /// or "whatever the current selection says".
-    pub fn default_reasoning_for(&self, model_id: &str) -> Option<ReasoningLevel> {
-        self.prefs.model_defaults.get(model_id).copied()
+    /// Key for a per-route default: `provider/model`.
+    pub fn model_default_key(provider_id: &str, model_id: &str) -> String {
+        format!("{provider_id}/{model_id}")
+    }
+
+    /// The pinned default reasoning for one provider+model route, when set.
+    /// Falls back to a legacy bare-model entry from older `ui.json` files.
+    pub fn default_reasoning_for(
+        &self,
+        provider_id: &str,
+        model_id: &str,
+    ) -> Option<ReasoningLevel> {
+        self.prefs
+            .model_defaults
+            .get(&Self::model_default_key(provider_id, model_id))
+            .copied()
+            .or_else(|| self.prefs.model_defaults.get(model_id).copied())
+    }
+
+    /// Pin a default reasoning level for one provider+model route.
+    pub fn set_model_default_reasoning(
+        &mut self,
+        provider_id: &str,
+        model_id: &str,
+        level: ReasoningLevel,
+    ) {
+        self.prefs.model_defaults.remove(model_id);
+        self.prefs
+            .model_defaults
+            .insert(Self::model_default_key(provider_id, model_id), level);
     }
 
     /// Reasoning for one bulk spec: the model's pinned default when set,
@@ -584,7 +690,7 @@ impl State {
     /// so the on-screen preview can never disagree with the runs.
     pub fn bulk_reasoning_for(&self, spec: &BulkSpec) -> ReasoningLevel {
         let level = self
-            .default_reasoning_for(&spec.model_id)
+            .default_reasoning_for(&spec.provider_id, &spec.model_id)
             .unwrap_or(self.setup.reasoning);
         level.clamp_to(Some(&levels_for(&spec.model)))
     }
@@ -658,6 +764,13 @@ impl State {
         self.setup.snapshot = cache.snapshot.clone();
         self.setup.models_loading = false;
         self.setup.model_idx = 0;
+        // Keep the user's place across reloads: re-seat the remembered model
+        // when it still exists in the new list.
+        if let Some(wanted) = self.setup.restore_model_id.clone() {
+            if let Some(idx) = self.setup.models.iter().position(|m| m.id == wanted) {
+                self.setup.model_idx = idx;
+            }
+        }
         self.setup.reasoning_idx = 0;
         self.snap_reasoning_to_default();
     }
@@ -680,21 +793,35 @@ impl State {
             return Vec::new();
         };
         self.setup.provider_idx = row_idx;
+        self.setup.selected_provider_id = Some(pid.clone());
+        // Switching providers re-seats that provider's last used model.
+        self.setup.restore_model_id = self.prefs.last_model.clone();
         let cached = self.setup.catalog_cache.get(&pid).cloned();
         if let Some(cache) = cached {
             self.adopt_catalog(&cache);
             Vec::new()
         } else {
-            let provider = self.selected_provider().expect("row just resolved");
-            self.setup.models.clear();
-            self.setup.model_idx = 0;
-            self.setup.models_loading = true;
-            self.requested_models_for = Some(pid);
-            vec![crate::action::Effect::FetchModels {
-                provider,
-                force: false,
-            }]
+            self.request_models(false)
         }
+    }
+
+    /// Re-seat `selected_provider_id` to whatever the (possibly filtered) row
+    /// set holds at the cursor and load that provider's models. Keeps
+    /// `setup.selected_provider_id` and `setup.models` in lockstep after the
+    /// visible rows change.
+    pub(crate) fn sync_selected_provider(&mut self) -> Vec<crate::action::Effect> {
+        let Some(pid) = self
+            .selected_provider_row()
+            .and_then(|r| self.registry.all().get(r.registry_idx))
+            .map(|p| p.id().to_string())
+        else {
+            return Vec::new();
+        };
+        if self.setup.selected_provider_id.as_deref() == Some(pid.as_str()) {
+            return Vec::new();
+        }
+        self.setup.selected_provider_id = Some(pid);
+        self.request_models(false)
     }
 
     /// (Re)load models for the current provider. `force` (F5) bypasses the
@@ -704,6 +831,11 @@ impl State {
             return Vec::new();
         };
         let pid = provider.id().to_string();
+        // Remember the current selection so `r`/F5 keeps the user's place.
+        self.setup.restore_model_id = self
+            .selected_model()
+            .map(|m| m.id.clone())
+            .or_else(|| self.prefs.last_model.clone());
         if !force {
             let cached = self.setup.catalog_cache.get(&pid).cloned();
             if let Some(cache) = cached {

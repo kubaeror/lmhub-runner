@@ -334,7 +334,9 @@ fn draw_reasoning(f: &mut Frame, state: &State, area: ratatui::layout::Rect) {
         .min(levels.len().saturating_sub(1));
     let default = state
         .selected_model()
-        .and_then(|m| state.prefs.model_defaults.get(&m.id).copied());
+        .map(|m| m.id.clone())
+        .zip(state.selected_provider_id())
+        .and_then(|(mid, pid)| state.default_reasoning_for(&pid, &mid));
     let spans: Vec<Span> = levels
         .iter()
         .enumerate()

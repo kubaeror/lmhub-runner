@@ -43,12 +43,16 @@ impl State {
     /// `d` in the Setup Reasoning pane: pin the current level as the
     /// current model's default (persisted, used on future selections).
     fn set_model_default(&mut self) -> Vec<Effect> {
+        let Some(pid) = self.selected_provider_id() else {
+            self.push_notice("select a provider first");
+            return Vec::new();
+        };
         let Some(model_id) = self.selected_model().map(|m| m.id.clone()) else {
             self.push_notice("select a model first");
             return Vec::new();
         };
         let level = self.selected_reasoning();
-        self.prefs.model_defaults.insert(model_id.clone(), level);
+        self.set_model_default_reasoning(&pid, &model_id, level);
         self.push_notice(format!(
             "default reasoning for {} → {}",
             model_id,
@@ -69,7 +73,7 @@ impl State {
             self.push_notice(format!("{} has no reasoning levels", model.model_id));
             return Vec::new();
         }
-        let current = self.prefs.model_defaults.get(&model.model_id).copied();
+        let current = self.default_reasoning_for(&model.provider_id, &model.model_id);
         let next = match current.and_then(|c| levels.iter().position(|l| *l == c)) {
             Some(idx) => levels[(idx + 1) % levels.len()],
             // No pinned default: continue from the user's current level when
@@ -83,9 +87,7 @@ impl State {
                     .unwrap_or(lmhub_core::ReasoningLevel::Off),
             },
         };
-        self.prefs
-            .model_defaults
-            .insert(model.model_id.clone(), next);
+        self.set_model_default_reasoning(&model.provider_id, &model.model_id, next);
         self.push_notice(format!(
             "default reasoning for {} → {}",
             model.model_id,

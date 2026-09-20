@@ -32,7 +32,7 @@ impl State {
             Action::ClearSearch => {
                 self.setup.provider_filter.clear();
                 self.clamp_provider_idx();
-                Vec::new()
+                self.sync_selected_provider()
             }
             Action::ToggleFavorite => self.toggle_favorite(),
             Action::ConnectProvider => self.connect_provider(),
@@ -63,7 +63,10 @@ impl State {
                 // the selected model and persist per model.
                 let current = self
                     .selected_model()
-                    .and_then(|m| self.default_reasoning_for(&m.id))
+                    .and_then(|m| {
+                        self.selected_provider_id()
+                            .and_then(|pid| self.default_reasoning_for(&pid, &m.id))
+                    })
                     .unwrap_or(self.setup.reasoning);
                 let start = levels.iter().position(|l| *l == current).unwrap_or(0);
                 let idx = (start as i32 + delta).rem_euclid(len as i32) as usize;
@@ -72,8 +75,11 @@ impl State {
                     .copied()
                     .unwrap_or(lmhub_core::ReasoningLevel::Off);
                 self.setup.reasoning_idx = idx;
-                if let Some(model) = self.selected_model() {
-                    self.prefs.model_defaults.insert(model.id.clone(), level);
+                if let (Some(model), Some(pid)) = (
+                    self.selected_model().map(|m| m.id.clone()),
+                    self.selected_provider_id(),
+                ) {
+                    self.set_model_default_reasoning(&pid, &model, level);
                 }
                 vec![Effect::SavePrefs]
             }
@@ -346,6 +352,17 @@ impl State {
                 return Vec::new();
             }
         };
+        // Guard against provider/model divergence: the loaded model list must
+        // belong to the provider we are about to run. `None` means the
+        // selection was never tracked (first launch/tests) — adopt it.
+        match self.setup.selected_provider_id.as_deref() {
+            Some(id) if id != provider.id() => {
+                self.push_notice("models for the selected provider are loading — try again");
+                return self.sync_selected_provider();
+            }
+            None => self.setup.selected_provider_id = Some(provider.id().to_string()),
+            Some(_) => {}
+        }
         let model = match self.selected_model() {
             Some(m) => m.clone(),
             None => {

@@ -3,7 +3,7 @@
 │  #1 gpt-4o [high] done   ││── turn 1                                                             ↑
 │▶ #2 gpt-4o-mini [high] 0s││Streaming a long answer about the refactor plan…                      █
 │                          ││streaming… (57 deltas)                                                █
-│                          ││Streaming a long answer about the refactor plan…                      █
+│                          ││                                                                      █
 │                          ││                                                                      █
 │                          ││                                                                      █
 │                          ││                                                                      █

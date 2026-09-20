@@ -64,10 +64,7 @@ impl State {
                 self.modal = None;
                 Vec::new()
             }
-            Action::FilterEdit(target, edit) => {
-                self.apply_filter_edit(target, edit);
-                Vec::new()
-            }
+            Action::FilterEdit(target, edit) => self.apply_filter_edit(target, edit),
             Action::Paste(text) => self.paste_text(text),
             Action::UiMsg(msg) => self.reduce_ui_msg(msg),
 
@@ -113,12 +110,14 @@ impl State {
     }
 
     /// Apply a cursor-aware edit to an inline filter, then re-clamp whatever
-    /// the filter narrows (provider row cursor / map row cursor).
+    /// the filter narrows (provider row cursor / map row cursor). Changing
+    /// the visible provider rows re-seats the selected provider so the model
+    /// list can never belong to a different provider.
     fn apply_filter_edit(
         &mut self,
         target: crate::action::FilterTarget,
         edit: crate::action::FilterEdit,
-    ) {
+    ) -> Vec<Effect> {
         use crate::action::{FilterEdit as E, FilterTarget as T};
         let field = match target {
             T::Providers => &mut self.setup.provider_filter,
@@ -134,9 +133,13 @@ impl State {
             E::End => field.move_end(),
         }
         match target {
-            T::Providers => self.clamp_provider_idx(),
+            T::Providers => {
+                self.clamp_provider_idx();
+                self.sync_selected_provider()
+            }
             T::ReasoningMap => {
                 self.map.idx = self.map.idx.min(self.map_rows().len().saturating_sub(1));
+                Vec::new()
             }
         }
     }
@@ -217,11 +220,11 @@ impl State {
                 // Cache under the provider it was fetched for — enables
                 // cross-provider bulk without refetching.
                 let cache = CachedCatalog::from_catalog(&catalog, snapshot.clone());
-                let is_current = self
-                    .requested_models_for
-                    .as_deref()
-                    .map(|r| r == requested_for.as_str())
-                    .unwrap_or(false);
+                // Only adopt when the response belongs to the provider that
+                // is still selected: a stale in-flight fetch must not replace
+                // the current model list.
+                let is_current =
+                    self.setup.selected_provider_id.as_deref() == Some(requested_for.as_str());
                 self.setup
                     .catalog_cache
                     .insert(requested_for.clone(), cache);
@@ -235,10 +238,10 @@ impl State {
                     {
                         let cached = self.setup.catalog_cache.get(&requested_for).cloned();
                         if let Some(cache) = cached {
+                            // adopt_catalog re-seats `restore_model_id` and
+                            // snaps the reasoning display itself.
                             self.adopt_catalog(&cache);
                         }
-                        self.restore_last_model();
-                        self.snap_reasoning_to_default();
                     }
                 }
                 Vec::new()
@@ -283,6 +286,9 @@ impl State {
                 if let Some(notice) = failure_notice {
                     self.push_notice(notice);
                 }
+                // Keep the finished backlog bounded (running/pending kept).
+                self.runs
+                    .prune_finished(crate::state::MAX_FINISHED_SESSIONS);
                 // A slot freed up: promote queued runs.
                 self.promote_pending()
             }
