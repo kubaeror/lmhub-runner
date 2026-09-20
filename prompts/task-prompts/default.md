@@ -1,0 +1,1 @@
+Build a small application from scratch inside the workspace: pick an appropriate stack, implement it with complete files, verify it runs, and finish with a concise summary of what you built and how to run it.

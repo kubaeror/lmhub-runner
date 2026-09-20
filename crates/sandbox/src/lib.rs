@@ -5,7 +5,7 @@
 //!   process-group kills, resource limits and a seccomp deny-list;
 //! - [`runtime::SandboxRuntime`] selects OS-level isolation (bubblewrap)
 //!   with a loud legacy fallback;
-//! - [`tools::ToolRuntime`] implements the seven controlled tools.
+//! - [`tools::ToolRuntime`] implements the 15 controlled tools.
 
 pub mod jail;
 pub mod proc;

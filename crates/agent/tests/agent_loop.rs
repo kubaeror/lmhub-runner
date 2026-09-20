@@ -121,6 +121,7 @@ fn spec(base: &std::path::Path, provider: Arc<dyn Provider>) -> RunSpec {
             read_file_max_bytes: 4096,
             write_file_max_bytes: 1_048_576,
             runtime: lmhub_sandbox::SandboxRuntime::Legacy,
+            allow_legacy_commands: true,
         },
     }
 }
@@ -225,6 +226,45 @@ async fn provider_failure_still_writes_statistics() {
 
     let errors = std::fs::read_to_string(outcome.run_dir.join("errors.log")).unwrap();
     assert!(errors.contains("provider_api"), "{errors}");
+}
+
+/// Pricing warnings land in `warningsCount` (emitted before the counter
+/// snapshot) and events.jsonl agrees with the document; `run_finished` is
+/// persisted before `statistics.json` (ordering invariant).
+#[tokio::test]
+async fn pricing_warnings_are_counted_in_statistics() {
+    let tmp = tempfile::tempdir().unwrap();
+    let outcome = execute(
+        spec(
+            tmp.path(),
+            Arc::new(MockProvider {
+                fail_on_first_call: false,
+            }),
+        ),
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(outcome.persistence_error.is_none());
+
+    let events_raw = std::fs::read_to_string(outcome.run_dir.join("events.jsonl")).unwrap();
+    let warnings = events_raw
+        .lines()
+        .filter(|l| l.contains("\"type\":\"warning\""))
+        .count();
+    assert!(warnings >= 1, "expected the no-price warning: {events_raw}");
+
+    let stats: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(outcome.run_dir.join("statistics.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        stats["warningsCount"].as_u64().unwrap() as usize,
+        warnings,
+        "warningsCount must equal the warning events (pricing warnings included)"
+    );
+    assert_eq!(stats["pricing"]["totalUsd"], serde_json::Value::Null);
+    assert!(events_raw.contains("run_finished"));
 }
 
 #[tokio::test]

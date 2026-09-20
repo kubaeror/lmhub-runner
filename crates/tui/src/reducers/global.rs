@@ -216,6 +216,11 @@ impl State {
                             let s = &outcome.stats;
                             run.final_text = outcome.final_text.clone();
                             run.run_dir = Some(outcome.run_dir.clone());
+                            if let Some(err) = &outcome.persistence_error {
+                                // The run executed but an artifact is missing:
+                                // never report this as a clean success.
+                                failure_notice = Some(format!("⚠ artifacts incomplete: {err}"));
+                            }
                             format!(
                                 "■ {} — cost {} USD — statistics: {}/statistics.json",
                                 s.status.as_str(),

@@ -25,4 +25,4 @@
 │                                                                                                  │
 │                                                                                                  │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
-  ↑/↓ select run  Enter statistics detail  F5 rescan  ? help  : palette                             
+[cmd: disabled]  ↑/↓ select run  Enter statistics detail  F5 rescan  ? help  : palette              

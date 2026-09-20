@@ -4,6 +4,9 @@
 //!
 //! Regenerate after intentional layout/copy changes with:
 //! `LMHUB_UPDATE_GOLDENS=1 cargo test -p lmhub-tui goldens`
+//!
+//! Setup-screen goldens render the bundled provider catalog, so the monthly
+//! `gen-providers` refresh also requires a regeneration.
 
 use crate::state::{CachedCatalog, Modal, RunSession, RunSessionStatus, State};
 use crate::transcript::{ToolCallEvent, Transcript, Turn};

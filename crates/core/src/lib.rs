@@ -11,6 +11,7 @@ pub mod provider;
 pub mod redact;
 pub mod stats;
 pub mod usage;
+pub mod util;
 
 pub use auth::{AuthStore, StoredCredential};
 pub use chat::{

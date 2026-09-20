@@ -35,6 +35,10 @@ pub struct AppConfig {
     /// Command isolation backend: `auto` (bubblewrap when available, legacy
     /// otherwise), `bwrap` (require it), or `legacy` (no OS isolation).
     pub sandbox: String,
+    /// `run_command` under the legacy (no-bwrap) backend: `deny` (default)
+    /// refuses every command, `allow` opts into unsandboxed execution.
+    /// File tools are always jailed regardless.
+    pub legacy_commands: String,
 }
 
 /// Default command allowlist: common developer tooling a coding agent needs
@@ -66,6 +70,7 @@ impl Default for AppConfig {
             retry_base_ms: 500,
             retry_cap_ms: 30_000,
             sandbox: "auto".into(),
+            legacy_commands: "deny".into(),
         }
     }
 }
@@ -135,6 +140,17 @@ impl AppConfig {
         } else {
             self.sandbox = sb;
         }
+        let lc = self.legacy_commands.trim().to_ascii_lowercase();
+        if lc != "deny" && lc != "allow" {
+            tracing::warn!(
+                config = "legacy_commands",
+                value = %self.legacy_commands,
+                "not `deny` or `allow`; refusing unsandboxed commands (deny)"
+            );
+            self.legacy_commands = "deny".into();
+        } else {
+            self.legacy_commands = lc;
+        }
     }
 
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
@@ -149,6 +165,11 @@ impl AppConfig {
 
     pub fn run_timeout(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.run_timeout_secs)
+    }
+
+    /// True when `run_command` may run without OS isolation (legacy backend).
+    pub fn legacy_commands_allowed(&self) -> bool {
+        self.legacy_commands == "allow"
     }
 
     pub fn command_timeout(&self) -> std::time::Duration {
@@ -194,5 +215,26 @@ mod tests {
                 .map(|s| s.to_string())
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn legacy_commands_defaults_to_deny_and_rejects_junk() {
+        assert_eq!(AppConfig::default().legacy_commands, "deny");
+        assert!(!AppConfig::default().legacy_commands_allowed());
+
+        let mut cfg = AppConfig {
+            legacy_commands: "Allow".into(), // case-normalized
+            ..AppConfig::default()
+        };
+        cfg.sanitize();
+        assert_eq!(cfg.legacy_commands, "allow");
+        assert!(cfg.legacy_commands_allowed());
+
+        let mut cfg = AppConfig {
+            legacy_commands: "yes".into(),
+            ..AppConfig::default()
+        };
+        cfg.sanitize();
+        assert_eq!(cfg.legacy_commands, "deny", "junk must fail closed");
     }
 }

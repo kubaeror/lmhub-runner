@@ -223,6 +223,10 @@ pub struct SandboxConfig {
     pub write_file_max_bytes: u64,
     /// OS-level isolation backend for `run_command`.
     pub runtime: crate::runtime::SandboxRuntime,
+    /// Whether `run_command` may run under [`SandboxRuntime::Legacy`]. `false`
+    /// (the default in config terms) refuses commands outright instead of
+    /// silently running them unsandboxed.
+    pub allow_legacy_commands: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1199,6 +1203,18 @@ impl ToolRuntime {
     }
 
     async fn run_command(&self, args: &Value) -> ToolOutcome {
+        // Policy first: under the legacy backend (no bwrap) commands are
+        // refused unless the user explicitly opted in, no matter the argv.
+        if !self.config.runtime.is_bwrap() && !self.config.allow_legacy_commands {
+            return ToolOutcome::fail(
+                "run_command is disabled: bubblewrap is unavailable (no filesystem isolation). \
+                 Install bubblewrap, or set `legacy_commands = \"allow\"` in config.toml to run \
+                 commands unsandboxed — the model can then read/write anywhere you can. \
+                 File tools remain jailed to the workspace.",
+                json!({"blocked": true, "reason": "legacy_commands_denied"}),
+                true,
+            );
+        }
         let Some(argv): Option<Vec<String>> =
             args.get("argv").and_then(|v| v.as_array()).map(|a| {
                 a.iter()
@@ -1452,6 +1468,11 @@ mod tests {
     use super::*;
 
     fn runtime() -> (tempfile::TempDir, ToolRuntime) {
+        runtime_with(true)
+    }
+
+    /// Same as [`runtime`] but with an explicit legacy-command policy.
+    fn runtime_with(allow_legacy_commands: bool) -> (tempfile::TempDir, ToolRuntime) {
         let dir = tempfile::tempdir().unwrap();
         let rt = ToolRuntime::create(
             &dir.path().join("ws"),
@@ -1461,10 +1482,55 @@ mod tests {
                 read_file_max_bytes: 1024,
                 write_file_max_bytes: 1_048_576,
                 runtime: crate::runtime::SandboxRuntime::Legacy,
+                allow_legacy_commands,
             },
         )
         .unwrap();
         (dir, rt)
+    }
+
+    #[tokio::test]
+    async fn legacy_deny_blocks_run_command_as_a_violation() {
+        let (_dir, rt) = runtime_with(false);
+        let out = rt
+            .execute("run_command", &json!({"argv": ["node", "--version"]}))
+            .await;
+        assert!(!out.success);
+        assert!(
+            out.sandbox_violation,
+            "policy refusal must be a sandbox violation: {}",
+            out.summary
+        );
+        assert!(
+            out.summary.contains("legacy_commands = \"allow\"")
+                && out.summary.contains("bubblewrap"),
+            "message must tell the user how to proceed: {}",
+            out.summary
+        );
+        assert_eq!(out.metadata["blocked"], json!(true));
+        assert_eq!(out.metadata["reason"], json!("legacy_commands_denied"));
+    }
+
+    #[tokio::test]
+    async fn legacy_allow_still_runs_allowlisted_commands() {
+        let (_dir, rt) = runtime_with(true);
+        let out = rt
+            .execute("run_command", &json!({"argv": ["node", "--version"]}))
+            .await;
+        assert!(out.success, "{}", out.summary);
+        assert!(!out.sandbox_violation);
+    }
+
+    #[tokio::test]
+    async fn legacy_deny_leaves_file_tools_working() {
+        let (_dir, rt) = runtime_with(false);
+        let out = rt
+            .execute("write_file", &json!({"path": "a.txt", "content": "hi"}))
+            .await;
+        assert!(out.success, "{}", out.summary);
+        let out = rt.execute("read_file", &json!({"path": "a.txt"})).await;
+        assert!(out.success, "{}", out.summary);
+        assert!(out.summary.contains("hi"), "{}", out.summary);
     }
 
     #[tokio::test]

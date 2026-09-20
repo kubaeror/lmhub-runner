@@ -150,9 +150,9 @@ impl EventSink {
         self.warning_count.load(Ordering::Relaxed)
     }
 
-    /// Flush and close both files; must be called before statistics.json is
-    /// written so counts and logs are consistent on disk. Fails loudly when
-    /// any event could not be persisted.
+    /// Flush and close both files. Called before `statistics.json` is written
+    /// (events land first so the document's counts match the logs). Fails
+    /// loudly when any event could not be persisted.
     pub fn finalize(self) -> std::io::Result<()> {
         let mut failed = self.write_failed.load(Ordering::Relaxed) > 0;
         for f in [&self.events_file, &self.errors_file] {

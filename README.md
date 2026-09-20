@@ -8,7 +8,7 @@ behavior and failures stay auditable after the fact.
 
 ## Features
 
-- **194 providers** from the models.dev catalog (the same set opencode ships),
+- **222 providers** from the models.dev catalog (the same set opencode ships),
   with native adapters for OpenAI, Anthropic, Google Gemini, Azure OpenAI,
   Amazon Bedrock (SigV4), Vertex AI, Cohere, GitLab Duo, GitHub Copilot
   (device flow) and watsonx/SAP AI Core pre-auth flows.
@@ -16,8 +16,8 @@ behavior and failures stay auditable after the fact.
   reasoning-level map and a run-history browser — with command palette and
   mouse support.
 - **Sandboxed execution**: filesystem jail, allowlisted commands, resource
-  limits and timeouts; OS-level isolation via bubblewrap with a seccomp
-  legacy fallback.
+  limits and timeouts; commands run under bubblewrap namespaces when
+  available, and are refused in legacy mode unless explicitly opted in.
 - **Streaming** (SSE) with automatic retries, `Retry-After` support and
   graceful reasoning-level degradation.
 - **Honest accounting**: unknown prices and ratios stay `null` with a warning
@@ -51,7 +51,7 @@ The interactive TUI starts — no CLI flags. The tabs are:
    level is used — that choice **survives navigating between models and
    providers**, so what you set is what bulk runs get. The confirmation
    modal shows the reasoning each run will actually use.
-4. **Reasoning** — every model across all 194 providers with its supported
+4. **Reasoning** — every model across all 222 providers with its supported
    reasoning levels (type to filter, `D` cycles the ★ default on the
    selected model, `F5` reloads the snapshot).
 5. **History** — previous runs; `Enter` opens their `statistics.json`
@@ -186,21 +186,38 @@ The model can only affect its `model-output/` directory:
 
 ### OS-level isolation
 
-When **bubblewrap** (`bwrap`) is installed — auto-detected at startup — each
-command runs inside user/pid/ipc/uts namespaces with a read-only view of the
-system (`/usr`, `/bin`, `/lib`, `/lib64`, `/etc`) and the model workspace as
-the only writable directory. `/proc` and `/dev` are fresh sandbox instances,
-so the command cannot see host processes or devices. **Network stays
-allowed** so `npm install` works. In **legacy mode** (bwrap missing, or user
-namespaces blocked — e.g. Ubuntu 24.04's `apparmor_restrict_unprivileged_userns`),
-the command runs directly and a **seccomp deny-list** applies instead
-(ptrace, cross-process memory access, mounts, kernel module loading, bpf,
-userfaultfd, io_uring, `unshare`/`setns`, namespace-flag `clone`); legacy
-mode logs a loud warning at startup. Seccomp cannot apply to the bwrap
-wrapper itself (bwrap needs those very syscalls), so under bwrap the
-namespace split carries that protection. Tune with
-`sandbox = "auto" | "bwrap" | "legacy"` in `~/.config/lmhub/config.toml`
-(or `LMHUB_BWRAP` to point at a bwrap binary).
+**File tools are always jailed**: every path goes through `PathJail`, so the
+model can only read/write inside the run workspace (canonicalization + prefix
+check, `..` rejected).
+
+**Commands are only isolated under bubblewrap.** When `bwrap` is installed —
+auto-detected at startup — `run_command` runs inside user/pid/ipc/uts
+namespaces with a read-only view of the system (`/usr`, `/bin`, `/lib`,
+`/lib64`, `/etc`) and the model workspace as the only writable directory.
+`/proc` and `/dev` are fresh namespaces, so the command cannot see host
+processes or devices. **Network stays allowed** so `npm install` works.
+
+When bwrap is missing (or user namespaces are blocked — e.g. Ubuntu 24.04's
+`apparmor_restrict_unprivileged_userns`), the runner enters **legacy mode**:
+
+- `run_command` is **refused by default** (a `sandbox_violation` recorded in
+  `errors.log`/`events.jsonl`) — the model is told to install bubblewrap or
+  ask you to opt in;
+- set `legacy_commands = "allow"` in `~/.config/lmhub/config.toml` to run
+  commands **unsandboxed** anyway: they execute directly as your user, with
+  only rlimits, a per-command timeout, process-group termination and a seccomp
+  deny-list (ptrace, cross-process memory access, mounts, kernel module
+  loading, bpf, userfaultfd, io_uring, `unshare`/`setns`, namespace-flag
+  `clone`). Use this only with providers you trust: the model can read/write
+  anywhere you can.
+
+Legacy mode logs a loud startup warning and the TUI status line always shows
+the mode (`[cmd: bwrap]`, `[cmd: legacy/unsandboxed]`, `[cmd: disabled]`).
+Seccomp cannot apply to the bwrap wrapper itself (bwrap needs those very
+syscalls), so under bwrap the namespace split carries that protection. Tune
+with `sandbox = "auto" | "bwrap" | "legacy"` and `legacy_commands = "deny" |
+"allow"` in `~/.config/lmhub/config.toml` (or `LMHUB_BWRAP` to point at a
+bwrap binary).
 
 Note: this is still application-level sandboxing (no full OS
 virtualisation). Run only with providers you trust accordingly.
@@ -225,7 +242,7 @@ reported but never billed twice.
 
 ## Providers (the full opencode catalog)
 
-The runner ships a bundled snapshot of **models.dev** — all 194 providers
+The runner ships a bundled snapshot of **models.dev** — all 222 providers
 opencode supports are available out of the box, routed through dedicated
 adapters per protocol:
 
@@ -296,6 +313,7 @@ max_output_tokens = 16384
 read_file_max_bytes = 48000
 write_file_max_bytes = 1000000
 sandbox = "auto"              # auto | bwrap | legacy (command isolation backend)
+legacy_commands = "deny"      # deny | allow — run_command without bubblewrap (see Sandbox)
 max_retries = 6
 retry_base_ms = 500
 retry_cap_ms = 30000
@@ -341,7 +359,7 @@ the binary plus `prompts/*.md`, `prompts/system-prompts/`,
 crates/core        domain types, Provider trait, statistics/event schemas,
                    auth store, redaction engine, config
 crates/modelsdev   models.dev client + local cache + pricing lookup
-crates/providers   native + routed adapters (194-provider catalog), model
+crates/providers   native + routed adapters (222-provider catalog), model
                    resolution chain, SigV4/JWT/device-flow helpers
 crates/sandbox     path jail, allowlisted process runner, the 15 tools,
                    bwrap/seccomp runtime detection

@@ -1,9 +1,9 @@
  [1] Setup │ [2] Run │ [3] History │ [4] Reasoning                                                  
- search: grok▏  — 1 match       ┌ Models [Models.dev] ─────────────┐┌ Model details ───────────────┐
+ search: grok▏  — 3 matches     ┌ Models [Models.dev] ─────────────┐┌ Model details ───────────────┐
 ┌ Providers ───────────────────┐│GPT-4o                            ││model   gpt-4o                │
 │Groq [no key]                 ││GPT-4o mini                       ││family  GPT                   │
-│                              ││GPT-4.1                           │└──────────────────────────────┘
-│                              ││                                  │┌ Reasoning (↑/↓ per model, ★=s┐
+│AgentRouter [no key]          ││GPT-4.1                           │└──────────────────────────────┘
+│klokintegration.se [no key]   ││                                  │┌ Reasoning (↑/↓ per model, ★=s┐
 │                              ││                                  ││[off] [low] [high★]           │
 │                              ││                                  │└──────────────────────────────┘
 │                              ││                                  │┌ System prompts (d=set default┐
@@ -25,4 +25,4 @@
 │                              ││                                  ││                              │
 │                              ││                                  ││                              │
 └──────────────────────────────┘└──────────────────────────────────┘└──────────────────────────────┘
-  type search providers  ←/→ focus pane  ↑/↓ select  Enter connect / set key  Backspace delete sear…
+[cmd: disabled]  type search providers  ←/→ focus pane  ↑/↓ select  Enter connect / set key  Backsp…

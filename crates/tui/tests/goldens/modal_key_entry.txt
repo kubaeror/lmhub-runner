@@ -18,11 +18,11 @@
 │302.AI [no key]              │║│                                  │└──────────────────────────────┘
 │Abacus [no key]              │║│                                  │┌ Task prompts (Ctrl-Enter = RU┐
 │abliteration.ai [no key]     │║│                                  ││                              │
+│above.dev [no key]           │║│                                  ││                              │
+│AgentRouter [no key]         │║│                                  ││                              │
+│Agnes AI [no key]            │║│                                  ││                              │
 │ai& [no key]                 │║│                                  ││                              │
 │AI-ROUTER [no key]           │║│                                  ││                              │
-│AIHubMix [no key]            │║│                                  ││                              │
-│AKI.IO [no key]              │║│                                  ││                              │
-│Alibaba [no key]             │║│                                  ││                              │
-│Alibaba (China) [no key]     │↓│                                  ││                              │
+│AI21 Labs [no key]           │↓│                                  ││                              │
 └─────────────────────────────┘ └──────────────────────────────────┘└──────────────────────────────┘
-  type search providers  ←/→ focus pane  ↑/↓ select  Enter connect / set key  Backspace delete sear…
+[cmd: disabled]  type search providers  ←/→ focus pane  ↑/↓ select  Enter connect / set key  Backsp…

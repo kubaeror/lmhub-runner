@@ -22,15 +22,28 @@ impl SandboxRuntime {
     pub fn is_bwrap(&self) -> bool {
         matches!(self, SandboxRuntime::Bwrap(_))
     }
+
+    /// Short label for startup banners / TUI status lines.
+    pub fn isolation_label(&self) -> &'static str {
+        match self {
+            SandboxRuntime::Bwrap(_) => "bwrap",
+            SandboxRuntime::Legacy => "legacy",
+        }
+    }
 }
 
 /// Resolve the runtime for the configured mode (`auto` | `bwrap` | `legacy`).
 /// Returns warnings so the caller can surface them to the user.
+///
+/// Detection never fails startup: without bwrap the file tools stay jailed
+/// (PathJail), but `run_command` refuses to run unless the user opts in with
+/// `legacy_commands = "allow"` — so a missing bwrap cannot silently turn into
+/// unsandboxed command execution.
 pub fn detect(configured: &str) -> (SandboxRuntime, Vec<String>) {
     let mut warnings = Vec::new();
     match configured {
         "legacy" => {
-            warnings.push("sandbox = \"legacy\": run_command has NO OS-level isolation".into());
+            warnings.push(legacy_warning("sandbox = \"legacy\" requested"));
             return (SandboxRuntime::Legacy, warnings);
         }
         "bwrap" | "auto" => {}
@@ -43,24 +56,30 @@ pub fn detect(configured: &str) -> (SandboxRuntime, Vec<String>) {
 
     let bwrap = find_bwrap();
     let Some(bwrap) = bwrap else {
-        warnings.push(
-            "bubblewrap (`bwrap`) not found — run_command runs WITHOUT OS-level isolation; \
-             install bubblewrap for the sandboxed backend"
-                .into(),
-        );
+        warnings.push(legacy_warning("bubblewrap (`bwrap`) not found"));
         return (SandboxRuntime::Legacy, warnings);
     };
 
     match self_test(&bwrap) {
         Ok(()) => (SandboxRuntime::Bwrap(bwrap), warnings),
         Err(e) => {
-            warnings.push(format!(
-                "bubblewrap self-test failed ({e}) — run_command runs WITHOUT OS-level \
-                 isolation; on Ubuntu 24.04+ try enabling unprivileged user namespaces"
-            ));
+            warnings.push(legacy_warning(&format!(
+                "bubblewrap self-test failed ({e}); on Ubuntu 24.04+ try enabling \
+                 unprivileged user namespaces"
+            )));
             (SandboxRuntime::Legacy, warnings)
         }
     }
+}
+
+/// Legacy-mode warning text. States the isolation loss plainly: file tools
+/// are jailed, commands are not.
+fn legacy_warning(cause: &str) -> String {
+    format!(
+        "{cause}: no filesystem isolation for commands; the model can read/write anywhere \
+         the user can. run_command is refused unless you install bubblewrap or set \
+         legacy_commands = \"allow\"; file tools remain jailed to the workspace."
+    )
 }
 
 fn find_bwrap() -> Option<PathBuf> {
@@ -123,5 +142,30 @@ fn self_test(bwrap: &Path) -> std::result::Result<(), String> {
         Ok(s) if s.success() => Ok(()),
         Ok(s) => Err(format!("bwrap exited {s}")),
         Err(e) => Err(e.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_detection_warning_states_the_isolation_loss() {
+        let (runtime, warnings) = detect("legacy");
+        assert_eq!(runtime, SandboxRuntime::Legacy);
+        let text = warnings.join(" ");
+        assert!(text.contains("no filesystem isolation"), "{text}");
+        assert!(text.contains("read/write anywhere"), "{text}");
+        assert!(text.contains("legacy_commands = \"allow\""), "{text}");
+        assert!(text.contains("file tools remain jailed"), "{text}");
+    }
+
+    #[test]
+    fn isolation_labels() {
+        assert_eq!(SandboxRuntime::Legacy.isolation_label(), "legacy");
+        assert_eq!(
+            SandboxRuntime::Bwrap(PathBuf::from("/usr/bin/bwrap")).isolation_label(),
+            "bwrap"
+        );
     }
 }
