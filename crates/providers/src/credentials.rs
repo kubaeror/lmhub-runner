@@ -17,6 +17,13 @@ pub fn resolve(
     env_keys: &[String],
 ) -> Option<ResolvedCredential> {
     if let Some(secret) = store.secret_for(provider_id) {
+        // Provenance is logged (never the secret) so credential bugs are
+        // diagnosable from runner.log.
+        tracing::debug!(
+            provider = provider_id,
+            source = "auth.json",
+            "credential resolved"
+        );
         return Some(ResolvedCredential {
             secret,
             source: "auth.json".to_string(),
@@ -25,6 +32,7 @@ pub fn resolve(
     for env_key in env_keys {
         if let Ok(value) = std::env::var(env_key) {
             if !value.trim().is_empty() && value.len() >= 8 {
+                tracing::debug!(provider = provider_id, source = %env_key, "credential resolved");
                 return Some(ResolvedCredential {
                     secret: value,
                     source: env_key.clone(),

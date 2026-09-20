@@ -38,7 +38,6 @@ impl State {
             Action::Quit => self.action_quit(),
             Action::ForceQuit => {
                 self.quit = true;
-                self.force_quit = true;
                 self.capture_prefs();
                 vec![Effect::SavePrefs]
             }
@@ -63,10 +62,6 @@ impl State {
             }
             Action::CloseModal => {
                 self.modal = None;
-                Vec::new()
-            }
-            Action::Notice(msg) => {
-                self.push_notice(msg);
                 Vec::new()
             }
             Action::FilterEdit(target, edit) => {

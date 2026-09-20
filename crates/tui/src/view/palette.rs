@@ -15,12 +15,7 @@ use ratatui::{
 pub fn draw(f: &mut Frame, state: &State, modal: &Modal) {
     match modal {
         Modal::EnterKey { provider_id, input } => {
-            draw_key_entry(
-                f,
-                provider_id,
-                input.as_str(),
-                state.setup.focus == crate::state::Pane::Providers,
-            );
+            draw_key_entry(f, provider_id, input.as_str());
         }
         Modal::Palette { filter, cursor } => draw_palette(f, state, filter.as_str(), *cursor),
         Modal::Help => draw_help(f, state),
@@ -48,7 +43,7 @@ fn modal_frame(f: &mut Frame, area: Rect, title: String) -> Rect {
     inner
 }
 
-fn draw_key_entry(f: &mut Frame, provider_id: &str, input: &str, _focused: bool) {
+fn draw_key_entry(f: &mut Frame, provider_id: &str, input: &str) {
     let area = centered_rect(f.area(), 60, 5);
     let inner = modal_frame(
         f,

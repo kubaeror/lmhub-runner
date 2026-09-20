@@ -32,11 +32,10 @@ pub fn draw(f: &mut Frame, state: &State, area: Rect, info: &mut RenderInfo) {
         .constraints([Constraint::Max(28), Constraint::Min(1)])
         .split(chunks[0]);
 
-    info.run_panes[0] = cols[0];
-    info.run_panes[1] = cols[1];
+    info.run_list = cols[0];
 
     draw_sessions(f, state, cols[0], info);
-    draw_transcript(f, state, cols[1], info);
+    draw_transcript(f, state, cols[1]);
     draw_stats(f, state, chunks[1]);
 }
 
@@ -100,7 +99,7 @@ fn draw_sessions(f: &mut Frame, state: &State, area: Rect, info: &mut RenderInfo
     render_scrollbar(f, bar_area, total, st.offset());
 }
 
-fn draw_transcript(f: &mut Frame, state: &State, area: Rect, info: &mut RenderInfo) {
+fn draw_transcript(f: &mut Frame, state: &State, area: Rect) {
     let Some(run) = state.runs.selected_run() else {
         return;
     };
@@ -135,8 +134,6 @@ fn draw_transcript(f: &mut Frame, state: &State, area: Rect, info: &mut RenderIn
     f.render_widget(Paragraph::new(visible), inner);
     f.render_widget(block, area);
     render_scrollbar(f, Some(bar), total, start);
-    info.transcript = start;
-    info.transcript_total = total;
 }
 
 /// All transcript lines (structured turns or raw feed), oldest first.

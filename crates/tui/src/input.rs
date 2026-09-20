@@ -31,11 +31,6 @@ impl EditField {
         self.value.is_empty()
     }
 
-    /// Byte length of the field.
-    pub fn len(&self) -> usize {
-        self.value.len()
-    }
-
     /// Replace the whole value; the cursor moves to the end.
     pub fn set(&mut self, value: impl Into<String>) {
         self.value = value.into();
@@ -97,10 +92,6 @@ impl EditField {
         for c in text.chars() {
             self.insert(c);
         }
-    }
-
-    pub fn cursor(&self) -> usize {
-        self.cursor
     }
 }
 

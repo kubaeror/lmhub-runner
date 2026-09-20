@@ -26,7 +26,6 @@ impl State {
             | Action::OpenPalette
             | Action::OpenHelp
             | Action::CloseModal
-            | Action::Notice(_)
             | Action::UiMsg(_)
             | Action::Paste(_)
             | Action::ScrollHistoryDetail(_)
@@ -210,7 +209,7 @@ mod tests {
             "prefs persisted on quit"
         );
         state.reduce(Action::ForceQuit);
-        assert!(state.quit && state.force_quit);
+        assert!(state.quit);
     }
 
     #[test]

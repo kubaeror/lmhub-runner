@@ -342,7 +342,6 @@ pub struct State {
     pub modal: Option<Modal>,
     pub notice: Option<(String, Instant)>,
     pub quit: bool,
-    pub force_quit: bool,
     /// A cancel request is already in flight (second q force-quits).
     pub cancel_requested: bool,
 
@@ -403,7 +402,6 @@ impl State {
             modal: None,
             notice: None,
             quit: false,
-            force_quit: false,
             cancel_requested: false,
             prefs,
             setup: SetupState {

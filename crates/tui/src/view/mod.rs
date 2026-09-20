@@ -44,16 +44,12 @@ pub struct RenderInfo {
     pub tab_bar: Rect,
     /// Setup panes, indexed by `Pane::ORDER`.
     pub setup_panes: [Rect; 5],
-    /// Run screen: `[0]` session list, `[1]` transcript.
-    pub run_panes: [Rect; 2],
+    /// Run screen session list.
+    pub run_list: Rect,
     /// Full-width list regions of the History / Reasoning screens.
     pub history_list: Rect,
     pub map_list: Rect,
     pub offsets: ListOffsets,
-    /// First visible transcript line of the selected run.
-    pub transcript: usize,
-    /// Total transcript lines (scrollbar extent).
-    pub transcript_total: usize,
 }
 
 const MIN_WIDTH: u16 = 60;
@@ -168,10 +164,10 @@ pub fn mouse_action(state: &State, info: &RenderInfo, col: u16, row: u16) -> Opt
             None
         }
         Screen::Run => {
-            if info.run_panes[0].contains(pos) {
+            if info.run_list.contains(pos) {
                 flat_row_at(
                     info.offsets.sessions,
-                    info.run_panes[0],
+                    info.run_list,
                     row,
                     state.runs.runs.len(),
                 )

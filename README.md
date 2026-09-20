@@ -79,14 +79,30 @@ defaults, the last task prompt and the concurrency cap persist in
 
 Providers need a credential: store it in the TUI (`Enter` on a provider →
 type the key) or set the env var the provider expects (`OPENAI_API_KEY`,
-`ANTHROPIC_API_KEY`, …). Keys live in `~/.config/lmhub/auth.json` (0600,
-atomic writes), and credentials resolve **auth.json → environment → none**
-per request. Local runtimes (ollama, lmstudio, llama.cpp, …) need none.
+`ANTHROPIC_API_KEY`, …). Keys live in `~/.config/lmhub/auth.json` (created
+mode `0600`, atomic writes), and credentials resolve **per request** in the
+order **auth.json → environment → none**, so a key entered in the TUI works
+immediately without a restart. `[key ok]` badges use the same rule. The
+catalog's `key_envs` list (not its full `env` list) decides which env vars
+count as credentials — e.g. `AZURE_RESOURCE_NAME` is never sent as a key.
+`LMHUB_GITHUB_CLIENT_ID` overrides the Copilot OAuth client id and
+`LMHUB_COPILOT_EDITOR_VERSION` the editor-version header.
+
+Local runtimes need no key: `ollama` (`http://localhost:11434/v1`),
+`llamacpp` (`http://localhost:8080/v1`), `vllm` (`http://localhost:8000/v1`),
+`localai` (`http://localhost:8080/v1`), `lmstudio`, `qvac` — all
+OpenAI-compatible and resolved even when models.dev does not list them.
 
 Custom providers live in [`providers/`](providers/) as TOML files — see
 [`providers/example.toml.example`](providers/example.toml.example). Adding one
 requires **no changes to the runner core**, and a custom entry overrides a
-bundled provider with the same `id`.
+bundled provider with the same `id`. Plain-`http` base URLs are refused for
+non-local hosts unless `allow_insecure = true` is set explicitly.
+
+Models.dev behavior: the catalog is fetched at startup, cached with a TTL and
+served stale (with a warning) when the network fails. A cache blob that no
+longer parses is reported as an error instead of silently yielding an empty
+provider list.
 
 Prompts are markdown files split into two lists, both discovered across
 `prompts/` (+ `~/.config/lmhub/prompts`, + cache) and deduped by name:
@@ -369,10 +385,12 @@ GitHub Actions on every push/PR: `cargo fmt --check`, `clippy -D warnings`,
 the full test suite (`--locked`), a release build smoke, `cargo audit`
 (advisories), `cargo deny` (licenses/bans/sources) — plus a monthly
 models.dev snapshot-drift check that fails if `xtask gen-providers` would
-change the bundled catalog. Tagging `v*` builds release binaries for linux
-(x86_64, aarch64-musl via cross) and macOS (x86_64, aarch64); tarballs ship
-the binary plus `prompts/*.md`, `prompts/system-prompts/`,
-`prompts/task-prompts/` and `providers/example.toml.example`.
+change the bundled catalog, and a weekly `cargo outdated --root-deps-only`
+direct-dependency drift report (scheduled runs only; stale deps never block
+PRs). Tagging `v*` builds release binaries for linux (x86_64, aarch64-musl
+via cross) and macOS (x86_64, aarch64); tarballs ship the binary plus
+`prompts/*.md`, `prompts/system-prompts/`, `prompts/task-prompts/` and
+`providers/example.toml.example`.
 
 ## Architecture
 

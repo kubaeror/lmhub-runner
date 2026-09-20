@@ -2,6 +2,7 @@
 
 use crate::credentials;
 use crate::http;
+use crate::wire_common::merge_warnings;
 use crate::wire_openai::{self, OpenAiWireOpts};
 use async_trait::async_trait;
 use lmhub_core::{AuthStore, ChatRequest, ChatResponse, CoreError, Provider, ProviderCaps, Result};
@@ -63,13 +64,6 @@ impl NativeOpenAiProvider {
         let duration = started.elapsed();
         wire_openai::parse_chat_response(&body, duration.as_millis() as u64, Vec::new())
     }
-}
-
-fn merge_warnings(mut resp: ChatResponse, warnings: Vec<String>) -> ChatResponse {
-    let mut all = warnings;
-    all.append(&mut resp.warnings);
-    resp.warnings = all;
-    resp
 }
 
 #[async_trait]

@@ -1,5 +1,15 @@
 //! Helpers shared by the wire adapters (error classification for the
-//! degradation ladders).
+//! degradation ladders, warning merging).
+
+use lmhub_core::ChatResponse;
+
+/// Prepend adapter-level degradation warnings to a response's own warnings.
+pub(crate) fn merge_warnings(mut resp: ChatResponse, warnings: Vec<String>) -> ChatResponse {
+    let mut all = warnings;
+    all.append(&mut resp.warnings);
+    resp.warnings = all;
+    resp
+}
 
 /// True when a provider error says tool/function calling is unsupported for
 /// this route, so the request can be retried once without `tools`.

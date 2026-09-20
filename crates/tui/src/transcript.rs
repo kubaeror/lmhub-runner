@@ -96,10 +96,6 @@ impl Transcript {
     pub fn live_turn(&self) -> Option<&Turn> {
         self.turns.last()
     }
-
-    pub fn is_empty(&self) -> bool {
-        self.turns.is_empty() && self.feed.is_empty()
-    }
 }
 
 #[cfg(test)]

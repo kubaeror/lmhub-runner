@@ -37,8 +37,6 @@ pub enum Action {
     /// `?` — open the keybinding help overlay.
     OpenHelp,
     CloseModal,
-    /// A transient status message from a background task.
-    Notice(String),
 
     // ---- setup -----------------------------------------------------------
     CycleFocus(bool),

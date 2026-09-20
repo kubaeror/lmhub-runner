@@ -140,10 +140,9 @@ impl Provider for NativeAnthropicProvider {
                         supports_thinking: false,
                     },
                 );
-                self.post_messages(&plain).await.map(|mut r| {
-                    r.warnings.extend(warnings.iter().cloned());
-                    r
-                })
+                self.post_messages(&plain)
+                    .await
+                    .map(|r| crate::wire_common::merge_warnings(r, warnings))
             }
             Err(CoreError::Provider(msg)) if crate::wire_common::is_tools_rejection(&msg) => {
                 warnings.push("provider rejected `tools`; retried without tools".into());
@@ -156,10 +155,9 @@ impl Provider for NativeAnthropicProvider {
                         supports_thinking: false,
                     },
                 );
-                self.post_messages(&plain).await.map(|mut r| {
-                    r.warnings.extend(warnings.iter().cloned());
-                    r
-                })
+                self.post_messages(&plain)
+                    .await
+                    .map(|r| crate::wire_common::merge_warnings(r, warnings))
             }
             Err(e) => Err(e),
         }

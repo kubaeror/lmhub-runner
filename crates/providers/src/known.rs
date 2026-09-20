@@ -168,9 +168,24 @@ impl KnownCatalog {
         serde_json::from_str(SNAPSHOT_JSON).unwrap_or_default()
     }
 
-    /// Resolve protocol + effective settings for every entry.
+    /// Resolve protocol + effective settings for every entry, including the
+    /// local-runtime fallbacks the catalog may not list yet.
     pub fn resolved(&self) -> Vec<ResolvedKnown> {
-        self.providers.iter().map(resolve_entry).collect()
+        let mut out: Vec<ResolvedKnown> = self.providers.iter().map(resolve_entry).collect();
+        for (id, name, url) in LOCAL_RUNTIME_FALLBACKS {
+            if out.iter().any(|r| r.entry.id == *id) {
+                continue;
+            }
+            out.push(resolve_entry(&KnownEntry {
+                id: (*id).to_string(),
+                name: (*name).to_string(),
+                npm: Some("@ai-sdk/openai-compatible".into()),
+                api: Some((*url).to_string()),
+                env: Vec::new(),
+                key_envs: Vec::new(),
+            }));
+        }
+        out
     }
 }
 
@@ -262,6 +277,16 @@ const LOCAL_IDS: &[&str] = &[
     "vllm",
     "qvac",
     "localai",
+];
+
+/// Local runtimes the runner supports natively even when the catalog does not
+/// list them. Plain-http localhost URLs, no credentials, OpenAI-compatible
+/// wire — the README's local-provider table must match this list.
+const LOCAL_RUNTIME_FALLBACKS: &[(&str, &str, &str)] = &[
+    ("ollama", "Ollama", "http://localhost:11434/v1"),
+    ("llamacpp", "llama.cpp", "http://localhost:8080/v1"),
+    ("vllm", "vLLM", "http://localhost:8000/v1"),
+    ("localai", "LocalAI", "http://localhost:8080/v1"),
 ];
 
 pub fn resolve_entry(entry: &KnownEntry) -> ResolvedKnown {
@@ -434,6 +459,26 @@ mod tests {
             key_envs: vec![],
         };
         assert!(!resolve_entry(&ollama).requires_key);
+    }
+
+    /// README-documented local runtimes resolve even when models.dev does not
+    /// list them: routable URL, no key required.
+    #[test]
+    fn local_runtime_fallbacks_resolve_without_keys() {
+        let resolved = KnownCatalog::load().resolved();
+        for id in ["ollama", "llamacpp", "vllm", "localai"] {
+            let entry = resolved
+                .iter()
+                .find(|r| r.entry.id == id)
+                .unwrap_or_else(|| panic!("{id} must resolve"));
+            assert!(!entry.requires_key, "{id} must not require a key");
+            let url = entry.base_url.as_deref().unwrap_or_default();
+            assert!(
+                url.starts_with("http://localhost:") || url.starts_with("http://127.0.0.1:"),
+                "{id}: unexpected base_url {url:?}"
+            );
+            assert_eq!(entry.protocol, ProtocolKind::OpenAiCompat);
+        }
     }
 
     #[test]
