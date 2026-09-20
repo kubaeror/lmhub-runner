@@ -49,6 +49,11 @@ pub struct AppConfig {
     /// byte for this long is stalled (this is not a total deadline, so
     /// healthy long streams keep running).
     pub stream_idle_timeout_secs: u64,
+    /// `find_files`/`search_files` walk depth (levels below the searched root).
+    pub walk_max_depth: u32,
+    /// `find_files`/`search_files` walk entry cap; the tool summary says when
+    /// the walk was truncated.
+    pub walk_max_entries: u64,
 }
 
 /// Lower bound applied to `max_history_tokens` by [`AppConfig::sanitize`].
@@ -89,6 +94,8 @@ impl Default for AppConfig {
             max_history_tokens: None,
             tool_result_max_bytes: 8_192,
             stream_idle_timeout_secs: 120,
+            walk_max_depth: 12,
+            walk_max_entries: 10_000,
         }
     }
 }
@@ -192,6 +199,8 @@ impl AppConfig {
             1,
             "stream_idle_timeout_secs",
         );
+        fix(&mut self.walk_max_depth, 1, "walk_max_depth");
+        fix(&mut self.walk_max_entries, 1, "walk_max_entries");
     }
 
     pub fn save(&self, path: &Path) -> std::io::Result<()> {

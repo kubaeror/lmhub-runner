@@ -194,11 +194,16 @@ The model can only affect its `model-output/` directory:
   resolved manually via `PATH` and passed as argv arrays — no shell.
 - **Process hygiene**: empty environment (`PATH`/`HOME`/`TMPDIR` inside the
   workspace only, `C.UTF-8` locale), per-command timeout, hard resource
-  limits (2 GiB address space, CPU, 64 MiB file size, 512 processes,
-  1024 fds), process-group termination on expiry (SIGTERM → 2 s grace →
-  SIGKILL).
+  limits (2 GiB address space, CPU, 64 MiB file size, 1024 fds), process-group
+  termination on expiry (SIGTERM → 2 s grace → SIGKILL). `RLIMIT_NPROC`
+  (512) is applied **only under bwrap**: it counts processes per real UID, so
+  in legacy mode it could fail for a busy machine rather than for the
+  command; the process-group kill contains fork bombs there instead.
 - **Violations** land in `errors.log` and `events.jsonl`; the runner never
   logs API keys or environment secrets (values are scrubbed at every sink).
+  A missing/unresolvable binary is *not* a violation: it is reported as
+  `sandbox_unavailable` so `toolCalls.failed` and violation counts stay
+  honest.
 
 ### OS-level isolation
 
@@ -351,6 +356,8 @@ legacy_commands = "deny"      # deny | allow — run_command without bubblewrap 
 # max_history_tokens = 60000  # optional cap; unset derives it from the model window
 tool_result_max_bytes = 8192  # trim oversized tool results when over the context budget
 stream_idle_timeout_secs = 120 # stalled SSE stream detection (not a total deadline)
+walk_max_depth = 12           # find_files/search_files walk depth below the root
+walk_max_entries = 10000      # entry cap; hitting it is reported in the tool summary
 max_retries = 6
 retry_base_ms = 500
 retry_cap_ms = 30000

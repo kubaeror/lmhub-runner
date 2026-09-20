@@ -213,6 +213,8 @@ fn spec(base: &std::path::Path, provider: Arc<dyn Provider>) -> RunSpec {
             write_file_max_bytes: 1_048_576,
             runtime: lmhub_sandbox::SandboxRuntime::Legacy,
             allow_legacy_commands: true,
+            walk_max_depth: 12,
+            walk_max_entries: 10_000,
         },
     }
 }

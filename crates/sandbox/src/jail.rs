@@ -1,6 +1,18 @@
 //! Filesystem jail confining every file tool to the model workspace
 //! (`model-output/`). Rejects `..` traversal and any path that resolves
 //! (directly or through symlinks) outside the jail root.
+//!
+//! # Residual TOCTOU risk
+//!
+//! `resolve` canonicalizes the path and checks the prefix, but the model
+//! still acts through ordinary paths afterwards: a symlink swapped in between
+//! the check and the `open(2)` could redirect the operation. The window is
+//! tiny and only reachable by a concurrent attacker inside the same
+//! workspace (the model itself can only write inside the jail), so it is
+//! accepted and documented rather than papered over. Writes additionally
+//! re-validate the parent directory right before the operation, and the
+//! workspace contains no secrets by construction — the jail protects against
+//! accidents and model confusion, not against a local adversary racing us.
 
 use lmhub_core::{CoreError, Result};
 use std::ffi::OsString;

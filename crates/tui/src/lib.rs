@@ -548,6 +548,8 @@ fn build_agent_spec(state: &State, run_id: u64) -> Option<lmhub_agent::RunSpec> 
             write_file_max_bytes: state.config.write_file_max_bytes,
             runtime: state.sandbox_runtime.clone(),
             allow_legacy_commands: state.config.legacy_commands_allowed(),
+            walk_max_depth: state.config.walk_max_depth as usize,
+            walk_max_entries: state.config.walk_max_entries as usize,
         },
     })
 }
