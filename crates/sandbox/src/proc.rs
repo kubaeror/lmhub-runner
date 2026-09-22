@@ -210,20 +210,18 @@ pub async fn run_allowlisted(
         // fill the disk, or fork-bomb before the wall-clock timeout fires.
         let cpu_secs = timeout.as_secs().saturating_add(5).max(60);
         let install_seccomp = !runtime.is_bwrap();
-        let nproc_isolated = runtime.is_bwrap();
         unsafe {
             cmd.pre_exec(move || {
                 set_rlimit(libc::RLIMIT_AS as u64, 2 * 1024 * 1024 * 1024);
                 set_rlimit(libc::RLIMIT_CPU as u64, cpu_secs);
                 set_rlimit(libc::RLIMIT_FSIZE as u64, 64 * 1024 * 1024);
-                // RLIMIT_NPROC counts processes per *real UID*, not per
-                // process group: in legacy mode a busy machine can already be
-                // at the limit, so node/npm would fail for reasons unrelated
-                // to the command. Under bwrap the user namespace maps the UID
-                // and the limit applies to the sandbox alone.
-                if nproc_isolated {
-                    set_rlimit(libc::RLIMIT_NPROC as u64, 512);
-                }
+                // Deliberately NO `RLIMIT_NPROC`: it counts tasks per *real
+                // UID* (globally, not per process group), so on a machine
+                // whose user already runs hundreds of tasks it makes even
+                // bwrap's own namespace `clone` fail with EAGAIN. Fork bombs
+                // are contained by the process-group SIGTERM/SIGKILL on
+                // timeout plus the address-space/CPU limits; in legacy mode
+                // seccomp additionally denies namespace-creating clone flags.
                 set_rlimit(libc::RLIMIT_NOFILE as u64, 1024);
                 if install_seccomp {
                     // Only in legacy mode: bwrap itself needs unshare/clone-

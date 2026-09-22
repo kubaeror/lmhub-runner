@@ -2196,6 +2196,18 @@
       "npm": "@ai-sdk/openai-compatible"
     },
     {
+      "api": "https://api.temprhq.io/v1",
+      "env": [
+        "TEMPR_API_KEY"
+      ],
+      "id": "tempr",
+      "key_envs": [
+        "TEMPR_API_KEY"
+      ],
+      "name": "Tempr",
+      "npm": "@ai-sdk/openai-compatible"
+    },
+    {
       "api": "https://api.lkeap.cloud.tencent.com/coding/v3",
       "env": [
         "TENCENT_CODING_PLAN_API_KEY"
@@ -2689,6 +2701,6 @@
       "npm": "@ai-sdk/openai-compatible"
     }
   ],
-  "snapshot_version": "6bb900d3e6a89d71",
+  "snapshot_version": "349e42c4776fae15",
   "source": "models.dev"
 }

@@ -199,10 +199,11 @@ The model can only affect its `model-output/` directory:
 - **Process hygiene**: empty environment (`PATH`/`HOME`/`TMPDIR` inside the
   workspace only, `C.UTF-8` locale), per-command timeout, hard resource
   limits (2 GiB address space, CPU, 64 MiB file size, 1024 fds), process-group
-  termination on expiry (SIGTERM → 2 s grace → SIGKILL). `RLIMIT_NPROC`
-  (512) is applied **only under bwrap**: it counts processes per real UID, so
-  in legacy mode it could fail for a busy machine rather than for the
-  command; the process-group kill contains fork bombs there instead.
+  termination on expiry (SIGTERM → 2 s grace → SIGKILL). `RLIMIT_NPROC` is
+  deliberately **not** set: it counts tasks per real UID (globally), so on a
+  machine whose user already runs hundreds of tasks it makes even bwrap's
+  namespace `clone` fail; fork bombs are contained by the process-group kill
+  and the address-space/CPU limits instead.
 - **Violations** land in `errors.log` and `events.jsonl`; the runner never
   logs API keys or environment secrets (values are scrubbed at every sink).
   A missing/unresolvable binary is *not* a violation: it is reported as
