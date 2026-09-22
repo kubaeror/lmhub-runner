@@ -92,12 +92,7 @@ impl Pane {
     ];
     pub fn cycle(&self, forward: bool) -> Self {
         let idx = Self::ORDER.iter().position(|p| p == self).unwrap_or(0);
-        let next = if forward {
-            (idx + 1) % Self::ORDER.len()
-        } else {
-            (idx + Self::ORDER.len() - 1) % Self::ORDER.len()
-        };
-        Self::ORDER[next]
+        Self::ORDER[crate::action::rotate(Self::ORDER.len(), idx, forward)]
     }
 }
 
@@ -1082,6 +1077,8 @@ mod prefs_tests {
         let model = |reasoning: bool, levels: Option<Vec<ReasoningLevel>>| lmhub_core::ModelInfo {
             capabilities: Capabilities {
                 reasoning,
+                reasoning_budget_min: None,
+                reasoning_budget_max: None,
                 reasoning_levels: levels,
                 ..Default::default()
             },

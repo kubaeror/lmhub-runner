@@ -36,8 +36,19 @@ pub fn thinking_budget(level: ReasoningLevel) -> Option<u32> {
     }
 }
 
+/// Effective budget: the model's declared value when present, else the
+/// per-level default. `off` never enables thinking.
+fn budget_for(req: &ChatRequest) -> Option<u32> {
+    if req.reasoning == ReasoningLevel::Off {
+        return None;
+    }
+    req.thinking_budget
+        .or_else(|| thinking_budget(req.reasoning))
+}
+
 pub fn build_chat_payload(req: &ChatRequest, opts: AnthropicWireOpts) -> Value {
-    let budget = thinking_budget(req.reasoning);
+    // A model-declared budget (models.dev) wins over the level constants.
+    let budget = budget_for(req);
     let thinking_enabled = opts.supports_thinking && budget.is_some();
 
     // Thinking requires max_tokens > budget_tokens.
@@ -749,6 +760,31 @@ mod stream_tests {
     fn empty_stream_is_parse_error() {
         let err = AnthropicStreamAccumulator::new().finish(1).unwrap_err();
         assert!(matches!(err, CoreError::Parse(_)), "{err:?}");
+    }
+
+    #[test]
+    fn model_declared_budget_overrides_the_level_constant() {
+        use crate::wire_test_util::sample_request;
+        let mut req = sample_request(ReasoningLevel::High);
+        req.thinking_budget = Some(5_000);
+        let p = build_chat_payload(
+            &req,
+            AnthropicWireOpts {
+                supports_thinking: true,
+            },
+        );
+        assert_eq!(p["thinking"]["budget_tokens"], json!(5_000));
+        assert_eq!(p["max_tokens"], json!(6_024), "budget + 1024 headroom");
+
+        // Without a declared budget the level constant still applies.
+        req.thinking_budget = None;
+        let p = build_chat_payload(
+            &req,
+            AnthropicWireOpts {
+                supports_thinking: true,
+            },
+        );
+        assert_eq!(p["thinking"]["budget_tokens"], json!(16_384));
     }
 
     #[test]

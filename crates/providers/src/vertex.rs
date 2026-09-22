@@ -33,10 +33,13 @@ pub fn resolve_project() -> Result<String> {
         .map_err(|_| CoreError::Other("vertex: set GOOGLE_VERTEX_PROJECT (project id)".into()))
 }
 
+/// Default Vertex location when the env does not set one.
+pub const DEFAULT_VERTEX_LOCATION: &str = "global";
+
 pub fn resolve_location() -> String {
     std::env::var("GOOGLE_VERTEX_LOCATION")
         .or_else(|_| std::env::var("VERTEX_LOCATION"))
-        .unwrap_or_else(|_| "global".into())
+        .unwrap_or_else(|_| DEFAULT_VERTEX_LOCATION.into())
 }
 
 fn gemini_stream_url(project: &str, location: &str, model: &str) -> String {

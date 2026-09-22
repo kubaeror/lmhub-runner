@@ -20,7 +20,7 @@ pub const MIN_SECRET_LEN: usize = 8;
 pub fn init() {
     // vars_os + lossy conversion: a non-UTF-8 env value must not panic the
     // runner (std::env::vars would).
-    let mut values: Vec<String> = std::env::vars_os()
+    let env_values: Vec<String> = std::env::vars_os()
         .filter_map(|(k, v)| {
             let ku = k.to_string_lossy().to_ascii_uppercase();
             if !SENSITIVE_MARKERS.iter().any(|m| ku.contains(m)) {
@@ -30,10 +30,14 @@ pub fn init() {
             (value.len() >= MIN_SECRET_LEN).then_some(value)
         })
         .collect();
-    values.extend(lock().iter().cloned());
+    // Hold the lock across merge+write: a concurrent `register_extra` must
+    // not land between the read and the assignment (it would be clobbered).
+    let mut secrets = lock();
+    let mut values = env_values;
+    values.extend(secrets.iter().cloned());
     values.sort_by_key(|v| std::cmp::Reverse(v.len()));
     values.dedup();
-    *lock() = values;
+    *secrets = values;
 }
 
 /// Register an additional secret value (auth.json entries, oauth tokens).

@@ -16,7 +16,7 @@
 │watsonx.ai [no key]          │║│                                  ││                              │
 │── ROUTED ──                 │║│                                  ││                              │
 │302.AI [no key]              │║│                                  │└──────────────────────────────┘
-│Abacus [no key]              │║│                                  │┌ Task prompts (Ctrl-Enter = RU┐
+│Abacus [no key]              │║│                                  │┌ Task prompts (Enter = RUN · x┐
 │abliteration.ai [no key]     │║│                                  ││  build                       │
 │above.dev [no key]           │║│                                  ││▶ refactor                    │
 │AgentRouter [no key]         │║│                                  ││                              │

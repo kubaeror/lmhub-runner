@@ -126,6 +126,8 @@ fn local_to_info(lm: &LocalModel) -> ModelInfo {
             reasoning: lm.reasoning,
             prompt_caching: false, // unknown until Models.dev says otherwise
             reasoning_levels: lm.parsed_reasoning_levels(),
+            reasoning_budget_min: None,
+            reasoning_budget_max: None,
         },
     }
 }
@@ -152,6 +154,8 @@ pub fn entry_to_info(entry: &ModelEntry) -> ModelInfo {
                 .map(|c| c.cache_read.is_some())
                 .unwrap_or(false),
             reasoning_levels: entry.reasoning_levels(),
+            reasoning_budget_min: entry.reasoning_budget_range().map(|(min, _)| min),
+            reasoning_budget_max: entry.reasoning_budget_range().map(|(_, max)| max),
         },
     }
 }

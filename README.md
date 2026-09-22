@@ -283,6 +283,15 @@ Every trim/drop is recorded as a `warning` event naming what was dropped.
 `max_history_tokens` in `config.toml` adds an optional cap on history
 tokens; unset, the budget is derived from the model window.
 
+### Thinking budgets
+
+When Models.dev declares a thinking-budget range for the model
+(`reasoning_options.budget_tokens`), the runner derives the per-level budget
+from it — `min` for minimal/low, the midpoint for medium and `max` for
+high/xhigh/max — and sends it as the provider's budget field. Models without
+a declared range keep the adapters' per-level constants. `off` never enables
+thinking (Gemini sends an explicit `thinkingBudget: 0`).
+
 ## Providers (the full opencode catalog)
 
 The runner ships a bundled snapshot of **models.dev** — all 222 providers

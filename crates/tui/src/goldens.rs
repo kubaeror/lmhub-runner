@@ -96,6 +96,8 @@ fn model(id: &str, name: &str, reasoning: bool) -> ModelInfo {
             tool_call: true,
             reasoning,
             prompt_caching: true,
+            reasoning_budget_min: None,
+            reasoning_budget_max: None,
             reasoning_levels: if reasoning {
                 Some(vec![
                     ReasoningLevel::Off,

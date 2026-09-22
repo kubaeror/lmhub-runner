@@ -146,6 +146,8 @@ mod tests {
             name: id.into(),
             capabilities: lmhub_core::Capabilities {
                 reasoning: true,
+                reasoning_budget_min: None,
+                reasoning_budget_max: None,
                 reasoning_levels: Some(vec![
                     lmhub_core::ReasoningLevel::Off,
                     lmhub_core::ReasoningLevel::Low,
@@ -435,6 +437,8 @@ mod tests {
             id: "claude-3-7-sonnet".into(),
             capabilities: lmhub_core::Capabilities {
                 reasoning: true,
+                reasoning_budget_min: None,
+                reasoning_budget_max: None,
                 reasoning_levels: Some(vec![
                     lmhub_core::ReasoningLevel::Off,
                     lmhub_core::ReasoningLevel::Low,
@@ -720,6 +724,8 @@ mod tests {
             id: id.into(),
             capabilities: lmhub_core::Capabilities {
                 reasoning: true,
+                reasoning_budget_min: None,
+                reasoning_budget_max: None,
                 reasoning_levels: Some(vec![
                     lmhub_core::ReasoningLevel::Off,
                     lmhub_core::ReasoningLevel::Low,

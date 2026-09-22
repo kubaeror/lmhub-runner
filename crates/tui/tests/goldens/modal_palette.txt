@@ -16,7 +16,7 @@
 │watsonx.ai [no key]  │                                                     │                      │
 │── ROUTED ──         │                                                     │                      │
 │302.AI [no key]      │                                                     │──────────────────────┘
-│Abacus [no key]      │                                                     │ompts (Ctrl-Enter = RU┐
+│Abacus [no key]      │                                                     │ompts (Enter = RUN · d┐
 │abliteration.ai [no k└─────────────────────────────────────────────────────┘                      │
 │above.dev [no key]           │║│                                  ││▶ refactor                    │
 │AgentRouter [no key]         │║│                                  ││                              │

@@ -23,6 +23,8 @@ impl From<ProviderCaps> for Capabilities {
             reasoning: c.reasoning,
             prompt_caching: c.prompt_caching,
             reasoning_levels: None,
+            reasoning_budget_min: None,
+            reasoning_budget_max: None,
         }
     }
 }

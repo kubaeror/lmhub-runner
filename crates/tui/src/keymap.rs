@@ -214,6 +214,9 @@ fn reasoning_map_keys(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('D') => Some(Action::CycleModelDefault),
         KeyCode::Backspace => Some(map_filter_edit(FilterEdit::Backspace)),
         KeyCode::Delete => Some(map_filter_edit(FilterEdit::Delete)),
+        // Cursor editing inside the filter (Setup keeps ←/→ for pane focus).
+        KeyCode::Left => Some(map_filter_edit(FilterEdit::Left)),
+        KeyCode::Right => Some(map_filter_edit(FilterEdit::Right)),
         KeyCode::Home => Some(map_filter_edit(FilterEdit::Home)),
         KeyCode::End => Some(map_filter_edit(FilterEdit::End)),
         KeyCode::Char(c) => Some(map_filter_edit(FilterEdit::Insert(c))),
@@ -347,6 +350,13 @@ mod tests {
             Some(Action::FilterEdit(
                 FilterTarget::ReasoningMap,
                 FilterEdit::Backspace
+            ))
+        ));
+        assert!(matches!(
+            dispatch(&s, key(KeyCode::Left)),
+            Some(Action::FilterEdit(
+                FilterTarget::ReasoningMap,
+                FilterEdit::Left
             ))
         ));
         // Uppercase D is still the cycle-default binding.

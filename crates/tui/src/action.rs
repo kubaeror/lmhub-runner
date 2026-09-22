@@ -156,13 +156,23 @@ impl Screen {
         }
     }
     pub fn cycle(&self, forward: bool) -> Self {
-        let idx = Self::ALL.iter().position(|s| s == self).unwrap_or(0);
-        let next = if forward {
-            (idx + 1) % Self::ALL.len()
-        } else {
-            (idx + Self::ALL.len() - 1) % Self::ALL.len()
-        };
-        Self::ALL[next]
+        Self::ALL[crate::action::rotate(
+            Self::ALL.len(),
+            Self::ALL.iter().position(|s| s == self).unwrap_or(0),
+            forward,
+        )]
+    }
+}
+
+/// Wrap-around index step shared by the `Pane`/`Screen` cycles.
+pub(crate) fn rotate(len: usize, current: usize, forward: bool) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    if forward {
+        (current + 1) % len
+    } else {
+        (current + len - 1) % len
     }
 }
 
@@ -202,4 +212,18 @@ pub enum Effect {
     RunCopilotFlow,
     /// Open a directory in the platform file manager (blocking spawn).
     OpenOutputDir(std::path::PathBuf),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rotate_wraps_both_ways() {
+        assert_eq!(rotate(4, 0, true), 1);
+        assert_eq!(rotate(4, 3, true), 0);
+        assert_eq!(rotate(4, 0, false), 3);
+        assert_eq!(rotate(0, 0, true), 0);
+        assert_eq!(rotate(0, 7, false), 0);
+    }
 }

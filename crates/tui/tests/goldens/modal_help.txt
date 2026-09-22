@@ -16,7 +16,7 @@
 │watsonx.ai [no│  ←/→              focus pane                                       │              │
 │── ROUTED ──  │  ↑/↓              select                                           │              │
 │302.AI [no key│  Enter            connect / set key                                │──────────────┘
-│Abacus [no key│  Backspace        delete search char                               │trl-Enter = RU┐
+│Abacus [no key│  Backspace        delete search char                               │nter = RUN · d┐
 │abliteration.a│  F                favorite provider                                │              │
 │above.dev [no │  m                multi-select models                              │              │
 │AgentRouter [n│  Space            toggle bulk                                      │              │

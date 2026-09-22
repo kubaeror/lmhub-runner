@@ -91,7 +91,7 @@ pub fn offered_levels(reasoning: bool, declared: Option<&[ReasoningLevel]>) -> V
         return vec![ReasoningLevel::Off];
     }
     match declared {
-        Some(levels) if levels.is_empty() => vec![ReasoningLevel::Off],
+        Some([]) => vec![ReasoningLevel::Off],
         Some(levels) => levels.to_vec(),
         None => ReasoningLevel::ALL.to_vec(),
     }

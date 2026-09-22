@@ -377,6 +377,7 @@ async fn run_loop(
             .with_messages(messages.clone())
             .with_reasoning(reasoning)
             .with_max_tokens(spec.max_output_tokens)
+            .with_thinking_budget(thinking_budget_for(&spec.model, reasoning))
             .with_prompt_cache(spec.enable_prompt_cache);
 
         // Provider failures propagate; the caller logs them exactly once.
@@ -508,6 +509,27 @@ fn argument_keys(arguments: &serde_json::Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Concrete thinking budget for a level from the model's declared
+/// `budget_tokens` range, or `None` (adapters use their per-level constants).
+fn thinking_budget_for(model: &ModelInfo, level: ReasoningLevel) -> Option<u32> {
+    if level == ReasoningLevel::Off {
+        return None;
+    }
+    let min = model.capabilities.reasoning_budget_min?;
+    let max = model.capabilities.reasoning_budget_max?;
+    if max == 0 {
+        return None;
+    }
+    let min = min.min(max);
+    let value = match level {
+        ReasoningLevel::Minimal | ReasoningLevel::Low => min,
+        ReasoningLevel::Medium => min + (max - min) / 2,
+        ReasoningLevel::High | ReasoningLevel::XHigh | ReasoningLevel::Max => max,
+        ReasoningLevel::Off => return None,
+    };
+    Some(value.min(u32::MAX as u64) as u32)
+}
+
 fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {
         (*s).to_string()
@@ -588,5 +610,48 @@ mod tests {
         );
         let log = std::fs::read_to_string(dir.path().join("errors.log")).unwrap();
         assert!(log.contains("persistence"), "{log}");
+    }
+
+    #[test]
+    fn thinking_budget_derives_from_the_declared_range() {
+        use lmhub_core::Capabilities;
+        let model = |min: Option<u64>, max: Option<u64>| ModelInfo {
+            capabilities: Capabilities {
+                reasoning: true,
+                reasoning_budget_min: min,
+                reasoning_budget_max: max,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let ranged = model(Some(1_024), Some(32_000));
+        assert_eq!(
+            thinking_budget_for(&ranged, ReasoningLevel::Off),
+            None,
+            "off never enables thinking"
+        );
+        assert_eq!(
+            thinking_budget_for(&ranged, ReasoningLevel::Low),
+            Some(1_024)
+        );
+        assert_eq!(
+            thinking_budget_for(&ranged, ReasoningLevel::Medium),
+            Some(1_024 + 15_488),
+            "medium sits in the middle of the declared range"
+        );
+        assert_eq!(
+            thinking_budget_for(&ranged, ReasoningLevel::Max),
+            Some(32_000)
+        );
+        assert_eq!(
+            thinking_budget_for(&model(None, None), ReasoningLevel::High),
+            None,
+            "no declaration → adapter constants"
+        );
+        assert_eq!(
+            thinking_budget_for(&model(Some(9_000), Some(2_000)), ReasoningLevel::High),
+            Some(2_000),
+            "inverted ranges are normalized to the declared max"
+        );
     }
 }

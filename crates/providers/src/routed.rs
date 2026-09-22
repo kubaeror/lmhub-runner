@@ -22,6 +22,10 @@ use lmhub_core::{
 };
 use std::sync::Arc;
 
+/// Watsonx default host/version when the env does not override them.
+const WATSONX_DEFAULT_HOST: &str = "https://eu-de.ml.cloud.ibm.com";
+const WATSONX_API_VERSION: &str = "2024-05-31";
+
 pub struct RoutedProvider {
     pub id: String,
     pub display_name: String,
@@ -260,12 +264,12 @@ impl Provider for RoutedProvider {
                     let api_key = self.key().await?;
                     let token = preauth::ibm_iam_token(&api_key).await?;
                     let host = std::env::var("WATSONX_AI_URL")
-                        .unwrap_or_else(|_| "https://eu-de.ml.cloud.ibm.com".into());
+                        .unwrap_or_else(|_| WATSONX_DEFAULT_HOST.into());
                     let project = std::env::var("WATSONX_AI_PROJECT_ID").map_err(|_| {
                         CoreError::Other("watsonx: set WATSONX_AI_PROJECT_ID".into())
                     })?;
                     let url = format!(
-                        "{}/ml/v1/text/chat?version=2024-05-31&project_id={project}",
+                        "{}/ml/v1/text/chat?version={WATSONX_API_VERSION}&project_id={project}",
                         host.trim_end_matches('/')
                     );
                     let headers = vec![("authorization".to_string(), format!("Bearer {token}"))];
@@ -468,13 +472,13 @@ impl RoutedProvider {
             ProtocolKind::OpenAiCompatIbmIam => {
                 let api_key = self.key().await?;
                 let token = preauth::ibm_iam_token(&api_key).await?;
-                let host = std::env::var("WATSONX_AI_URL")
-                    .unwrap_or_else(|_| "https://eu-de.ml.cloud.ibm.com".into());
+                let host =
+                    std::env::var("WATSONX_AI_URL").unwrap_or_else(|_| WATSONX_DEFAULT_HOST.into());
                 let project = std::env::var("WATSONX_AI_PROJECT_ID")
                     .map_err(|_| CoreError::Other("watsonx: set WATSONX_AI_PROJECT_ID".into()))?;
                 Ok((
                     format!(
-                        "{}/ml/v1/text/chat?version=2024-05-31&project_id={project}",
+                        "{}/ml/v1/text/chat?version={WATSONX_API_VERSION}&project_id={project}",
                         host.trim_end_matches('/')
                     ),
                     vec![("authorization".to_string(), format!("Bearer {token}"))],

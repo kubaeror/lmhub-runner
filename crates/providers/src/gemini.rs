@@ -72,7 +72,13 @@ fn build_payload_inner(request: &ChatRequest, include_thinking: bool) -> Value {
     // maxOutputTokens must exceed the thinking budget when thinking is
     // enabled (mirrors the Anthropic wire layer).
     let thinking = include_thinking
-        .then(|| thinking_budget(request.reasoning))
+        .then(|| {
+            // A model-declared budget (models.dev) wins over the constants.
+            request
+                .thinking_budget
+                .map(|b| b as i64)
+                .or_else(|| thinking_budget(request.reasoning))
+        })
         .flatten();
     let mut max_output = request.max_tokens;
     if let Some(budget) = thinking {
@@ -412,6 +418,22 @@ mod tests {
         let req = sample_request(ReasoningLevel::High);
         let p = build_payload_without_thinking(&req);
         assert!(p["generationConfig"].get("thinkingConfig").is_none(), "{p}");
+    }
+
+    #[test]
+    fn model_declared_budget_overrides_the_level_constant() {
+        let mut req = sample_request(ReasoningLevel::High);
+        req.thinking_budget = Some(4_000);
+        let p = build_payload(&req);
+        assert_eq!(
+            p["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+            json!(4_000)
+        );
+        assert_eq!(
+            p["generationConfig"]["maxOutputTokens"],
+            json!(5_024),
+            "budget + 1024 headroom"
+        );
     }
 
     #[tokio::test]

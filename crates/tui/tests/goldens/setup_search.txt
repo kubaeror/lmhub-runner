@@ -16,7 +16,7 @@
 │                              ││                                  ││                              │
 │                              ││                                  ││                              │
 │                              ││                                  │└──────────────────────────────┘
-│                              ││                                  │┌ Task prompts (Ctrl-Enter = RU┐
+│                              ││                                  │┌ Task prompts (Enter = RUN · d┐
 │                              ││                                  ││  build                       │
 │                              ││                                  ││▶ refactor                    │
 │                              ││                                  ││                              │

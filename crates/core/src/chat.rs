@@ -238,6 +238,10 @@ pub struct ChatRequest {
     pub tools: Vec<ToolSpec>,
     pub reasoning: ReasoningLevel,
     pub max_tokens: u32,
+    /// Explicit thinking budget in tokens when the model declares one
+    /// (models.dev `reasoning_options.budget_tokens`); adapters otherwise
+    /// derive it from the reasoning level constants.
+    pub thinking_budget: Option<u32>,
     /// Ask the adapter to use prompt caching when supported.
     /// Adapters must degrade gracefully when it is not.
     pub enable_prompt_cache: bool,
@@ -252,6 +256,7 @@ impl ChatRequest {
             tools: Vec::new(),
             reasoning: ReasoningLevel::Off,
             max_tokens: 16_384,
+            thinking_budget: None,
             enable_prompt_cache: true,
         }
     }
@@ -273,6 +278,12 @@ impl ChatRequest {
 
     pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
         self.max_tokens = max_tokens;
+        self
+    }
+
+    /// Set the explicit thinking budget (tokens) for this request.
+    pub fn with_thinking_budget(mut self, budget: Option<u32>) -> Self {
+        self.thinking_budget = budget;
         self
     }
 

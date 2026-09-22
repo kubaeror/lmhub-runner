@@ -190,6 +190,8 @@ fn spec(base: &std::path::Path, provider: Arc<dyn Provider>) -> RunSpec {
                 tool_call: true,
                 reasoning: true,
                 prompt_caching: true,
+                reasoning_budget_min: None,
+                reasoning_budget_max: None,
                 reasoning_levels: None,
             },
         },
