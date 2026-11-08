@@ -23,6 +23,6 @@
 │Agnes AI [no key]            │║│                                  ││                              │
 │ai& [no key]                 │║│                                  ││                              │
 │AI-ROUTER [no key]           │║│                                  ││                              │
-│AI21 Labs [no key]           │↓│                                  ││                              │
+│AI/ML API [no key]           │↓│                                  ││                              │
 └─────────────────────────────┘ └──────────────────────────────────┘└──────────────────────────────┘
 [cmd: disabled]  type search providers  ←/→ focus pane  ↑/↓ select  Enter connect / set key  Backsp…

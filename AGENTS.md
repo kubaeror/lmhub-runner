@@ -9,7 +9,7 @@ never break.
 A Rust workspace (`lmhub-runner` binary) that runs LLMs as **coding agents**:
 a model gets a public system prompt + 15 tools and works inside a sandboxed
 workspace. A ratatui TUI drives provider/model/reasoning selection, live runs
-and history. The bundled catalog covers all 194 providers from models.dev.
+and history. The bundled catalog covers all 235 providers from models.dev.
 
 ## Commands
 
@@ -104,7 +104,7 @@ belongs to the TUI). `LMHUB_CONFIG_DIR`/`LMHUB_CACHE_DIR`/`LMHUB_OUTPUT_DIR`/
 Three ways, in increasing effort:
 
 1. **It's already in the catalog** — just set its env key (or store it via
-   the TUI). The bundled snapshot knows all 194.
+   the TUI). The bundled snapshot knows all 235.
 2. **Custom TOML** — drop a file in `providers/` following
    `example.toml.example` (`api_type` openai-compatible or
    anthropic-compatible, `[[models]]` with optional `reasoning_levels`).

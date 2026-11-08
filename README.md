@@ -8,7 +8,7 @@ behavior and failures stay auditable after the fact.
 
 ## Features
 
-- **222 providers** from the models.dev catalog (the same set opencode ships),
+- **235 providers** from the models.dev catalog (the same set opencode ships),
   with native adapters for OpenAI, Anthropic, Google Gemini, Azure OpenAI,
   Amazon Bedrock (SigV4), Vertex AI, Cohere, GitLab Duo, GitHub Copilot
   (device flow) and watsonx/SAP AI Core pre-auth flows.
@@ -51,7 +51,7 @@ The interactive TUI starts — no CLI flags. The tabs are:
    level is used — that choice **survives navigating between models and
    providers**, so what you set is what bulk runs get. The confirmation
    modal shows the reasoning each run will actually use.
-4. **Reasoning** — every model across all 222 providers with its supported
+4. **Reasoning** — every model across all 235 providers with its supported
    reasoning levels (type to filter, `D` cycles the ★ default on the
    selected model, `F5` reloads the snapshot).
 5. **History** — previous runs; `Enter` opens their `statistics.json`
@@ -295,7 +295,7 @@ thinking (Gemini sends an explicit `thinkingBudget: 0`).
 
 ## Providers (the full opencode catalog)
 
-The runner ships a bundled snapshot of **models.dev** — all 222 providers
+The runner ships a bundled snapshot of **models.dev** — all 235 providers
 opencode supports are available out of the box, routed through dedicated
 adapters per protocol:
 
@@ -419,7 +419,7 @@ via cross) and macOS (x86_64, aarch64); tarballs ship the binary plus
 crates/core        domain types, Provider trait, statistics/event schemas,
                    auth store, redaction engine, config
 crates/modelsdev   models.dev client + local cache + pricing lookup
-crates/providers   native + routed adapters (222-provider catalog), model
+crates/providers   native + routed adapters (235-provider catalog), model
                    resolution chain, SigV4/JWT/device-flow helpers
 crates/sandbox     path jail, allowlisted process runner, the 15 tools,
                    bwrap/seccomp runtime detection
