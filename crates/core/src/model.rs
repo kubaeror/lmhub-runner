@@ -32,6 +32,13 @@ pub struct Capabilities {
     /// not produced (empty declarations are treated as unknown).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_levels: Option<Vec<ReasoningLevel>>,
+    /// Declared thinking-budget range in tokens (models.dev
+    /// `reasoning_options.budget_tokens`). Adapters derive a concrete budget
+    /// per level from this range; `None` falls back to their constants.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_budget_min: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_budget_max: Option<u64>,
 }
 
 /// A model known to the runner (from any source).
@@ -88,6 +95,24 @@ impl ModelInfo {
             (Some(a), None) => Some(a.clone()),
             (None, Some(b)) => Some(b.clone()),
             (None, None) => None,
+        };
+        // Thinking-budget range: fill gaps, but keep the narrower max when
+        // both sources declare one.
+        self.capabilities.reasoning_budget_min = match (
+            self.capabilities.reasoning_budget_min,
+            other.capabilities.reasoning_budget_min,
+        ) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (Some(a), None) => Some(a),
+            (None, b) => b,
+        };
+        self.capabilities.reasoning_budget_max = match (
+            self.capabilities.reasoning_budget_max,
+            other.capabilities.reasoning_budget_max,
+        ) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) => Some(a),
+            (None, b) => b,
         };
     }
 }

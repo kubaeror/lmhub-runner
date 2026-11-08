@@ -16,13 +16,13 @@
 │watsonx.ai [no│  ←/→              focus pane                                       │              │
 │── ROUTED ──  │  ↑/↓              select                                           │              │
 │302.AI [no key│  Enter            connect / set key                                │──────────────┘
-│Abacus [no key│  Backspace        delete search char                               │trl-Enter = RU┐
+│Abacus [no key│  Backspace        delete search char                               │nter = RUN · d┐
 │abliteration.a│  F                favorite provider                                │              │
-│ai& [no key]  │  m                multi-select models                              │              │
-│AI-ROUTER [no │  Space            toggle bulk                                      │              │
-│AIHubMix [no k│  C                clear bulk                                       │              │
-│AKI.IO [no key└────────────────────────────────────────────────────────────────────┘              │
-│Alibaba [no key]             │║│                                  ││                              │
-│Alibaba (China) [no key]     │↓│                                  ││                              │
+│above.dev [no │  m                multi-select models                              │              │
+│AgentRouter [n│  Space            toggle bulk                                      │              │
+│Agnes AI [no k│  C                clear bulk                                       │              │
+│ai& [no key]  └────────────────────────────────────────────────────────────────────┘              │
+│AI-ROUTER [no key]           │║│                                  ││                              │
+│AI/ML API [no key]           │↓│                                  ││                              │
 └─────────────────────────────┘ └──────────────────────────────────┘└──────────────────────────────┘
-  type search providers  ←/→ focus pane  ↑/↓ select  Enter connect / set key  Backspace delete sear…
+[cmd: disabled]  type search providers  ←/→ focus pane  ↑/↓ select  Enter connect / set key  Backsp…

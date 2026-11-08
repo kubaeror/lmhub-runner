@@ -85,15 +85,15 @@ pub const SETUP: &[Binding] = &[
     },
     Binding {
         key: "r",
-        action: "reload models",
+        action: "reload models (Models/Prompts/Reasoning panes)",
     },
     Binding {
         key: "d",
         action: "set default (prompt/reasoning)",
     },
     Binding {
-        key: "Ctrl-Enter",
-        action: "run selection",
+        key: "Enter/Ctrl-Enter",
+        action: "run selection (Task pane)",
     },
 ];
 
@@ -147,6 +147,10 @@ pub const REASONING: &[Binding] = &[
     Binding {
         key: "type",
         action: "filter models",
+    },
+    Binding {
+        key: "Backspace",
+        action: "delete filter char",
     },
     Binding {
         key: "↑/↓",

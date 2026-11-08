@@ -16,13 +16,13 @@
 │watsonx.ai [no key]  │                                                     │                      │
 │── ROUTED ──         │                                                     │                      │
 │302.AI [no key]      │                                                     │──────────────────────┘
-│Abacus [no key]      │                                                     │ompts (Ctrl-Enter = RU┐
+│Abacus [no key]      │                                                     │ompts (Enter = RUN · x┐
 │abliteration.ai [no k│                                                     │                      │
-│ai& [no key]         └─────────────────────────────────────────────────────┘or                    │
+│above.dev [no key]   └─────────────────────────────────────────────────────┘or                    │
+│AgentRouter [no key]         │║│                                  ││                              │
+│Agnes AI [no key]            │║│                                  ││                              │
+│ai& [no key]                 │║│                                  ││                              │
 │AI-ROUTER [no key]           │║│                                  ││                              │
-│AIHubMix [no key]            │║│                                  ││                              │
-│AKI.IO [no key]              │║│                                  ││                              │
-│Alibaba [no key]             │║│                                  ││                              │
-│Alibaba (China) [no key]     │↓│                                  ││                              │
+│AI/ML API [no key]           │↓│                                  ││                              │
 └─────────────────────────────┘ └──────────────────────────────────┘└──────────────────────────────┘
-  type search providers  ←/→ focus pane  ↑/↓ select  Enter connect / set key  Backspace delete sear…
+[cmd: disabled]  type search providers  ←/→ focus pane  ↑/↓ select  Enter connect / set key  Backsp…

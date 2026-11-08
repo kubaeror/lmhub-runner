@@ -33,10 +33,13 @@ pub fn resolve_project() -> Result<String> {
         .map_err(|_| CoreError::Other("vertex: set GOOGLE_VERTEX_PROJECT (project id)".into()))
 }
 
+/// Default Vertex location when the env does not set one.
+pub const DEFAULT_VERTEX_LOCATION: &str = "global";
+
 pub fn resolve_location() -> String {
     std::env::var("GOOGLE_VERTEX_LOCATION")
         .or_else(|_| std::env::var("VERTEX_LOCATION"))
-        .unwrap_or_else(|_| "global".into())
+        .unwrap_or_else(|_| DEFAULT_VERTEX_LOCATION.into())
 }
 
 fn gemini_stream_url(project: &str, location: &str, model: &str) -> String {
@@ -61,6 +64,38 @@ fn anthropic_url(project: &str, location: &str, model: &str) -> String {
     format!(
         "https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/anthropic/models/{model}:rawPredict"
     )
+}
+
+/// Validate the service-account `token_uri` before POSTing the signed JWT to
+/// it.
+///
+/// A tampered ADC file could otherwise exfiltrate a cloud-scoped bearer
+/// assertion to an arbitrary host. Only HTTPS on `*.googleapis.com` is
+/// accepted; userinfo (`user@host`) is rejected outright.
+fn validate_token_uri(uri: &str) -> Result<()> {
+    let bad = |why: &str| {
+        CoreError::Other(format!(
+            "vertex: refusing token_uri {uri:?} in ADC ({why}); expected https://*.googleapis.com"
+        ))
+    };
+    if uri.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(bad("whitespace/control characters"));
+    }
+    let host_port = uri
+        .strip_prefix("https://")
+        .ok_or_else(|| bad("not https"))?
+        .split('/')
+        .next()
+        .unwrap_or("");
+    if host_port.contains('@') {
+        return Err(bad("userinfo component"));
+    }
+    let host = host_port.split(':').next().unwrap_or("");
+    if host == "googleapis.com" || host.ends_with(".googleapis.com") {
+        Ok(())
+    } else {
+        Err(bad("host is not googleapis.com"))
+    }
 }
 
 async fn resolve_bearer(
@@ -115,6 +150,7 @@ async fn exchange_service_account_jwt(key_path: &str) -> Result<(String, i64)> {
         .get("token_uri")
         .and_then(|v| v.as_str())
         .unwrap_or(OAUTH_TOKEN_URL);
+    validate_token_uri(token_uri)?;
 
     let now = chrono::Utc::now().timestamp();
     let claims = json!({
@@ -277,5 +313,26 @@ mod tests {
         std::env::remove_var("LMHUB_TEST_VLOC");
         // direct helper check through env absence is covered by resolve_location
         let _ = resolve_location();
+    }
+
+    #[test]
+    fn token_uri_must_be_https_googleapis() {
+        // Legitimate service-account token URIs pass.
+        assert!(validate_token_uri("https://oauth2.googleapis.com/token").is_ok());
+        assert!(validate_token_uri("https://accounts.google.com/o/oauth2/token").is_err());
+        // Rejected: plain http, userinfo tricks, lookalike hosts, spaces.
+        for uri in [
+            "http://oauth2.googleapis.com/token",
+            "https://evil.example.com/token",
+            "https://googleapis.com.evil.example/token",
+            "https://evil.example@oauth2.googleapis.com/token", // userinfo — reject
+            "https://oauth2.googleapis.com token",
+        ] {
+            let err = validate_token_uri(uri).unwrap_err();
+            assert!(
+                err.to_string().contains("token_uri"),
+                "{uri}: unexpected error {err}"
+            );
+        }
     }
 }

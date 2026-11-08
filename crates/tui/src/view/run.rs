@@ -32,11 +32,10 @@ pub fn draw(f: &mut Frame, state: &State, area: Rect, info: &mut RenderInfo) {
         .constraints([Constraint::Max(28), Constraint::Min(1)])
         .split(chunks[0]);
 
-    info.run_panes[0] = cols[0];
-    info.run_panes[1] = cols[1];
+    info.run_list = cols[0];
 
     draw_sessions(f, state, cols[0], info);
-    draw_transcript(f, state, cols[1], info);
+    draw_transcript(f, state, cols[1]);
     draw_stats(f, state, chunks[1]);
 }
 
@@ -54,9 +53,7 @@ fn draw_sessions(f: &mut Frame, state: &State, area: Rect, info: &mut RenderInfo
             };
             let (status_color, status) = match r.status {
                 RunSessionStatus::Pending => (Color::Yellow, "queued".to_string()),
-                RunSessionStatus::Running => {
-                    (Color::Cyan, format!("{}s", r.started.elapsed().as_secs()))
-                }
+                RunSessionStatus::Running => (Color::Cyan, format!("{}s", r.elapsed().as_secs())),
                 RunSessionStatus::Finished => (
                     if r.finished_line
                         .as_deref()
@@ -102,7 +99,7 @@ fn draw_sessions(f: &mut Frame, state: &State, area: Rect, info: &mut RenderInfo
     render_scrollbar(f, bar_area, total, st.offset());
 }
 
-fn draw_transcript(f: &mut Frame, state: &State, area: Rect, info: &mut RenderInfo) {
+fn draw_transcript(f: &mut Frame, state: &State, area: Rect) {
     let Some(run) = state.runs.selected_run() else {
         return;
     };
@@ -137,8 +134,6 @@ fn draw_transcript(f: &mut Frame, state: &State, area: Rect, info: &mut RenderIn
     f.render_widget(Paragraph::new(visible), inner);
     f.render_widget(block, area);
     render_scrollbar(f, Some(bar), total, start);
-    info.transcript = start;
-    info.transcript_total = total;
 }
 
 /// All transcript lines (structured turns or raw feed), oldest first.
@@ -150,73 +145,83 @@ fn transcript_lines(run: &RunSession, max_w: usize) -> Vec<Line<'static>> {
         }
         return lines;
     }
-    for turn in &run.transcript.turns {
-        let mut meta = String::new();
-        if turn.duration_ms > 0 {
-            meta.push_str(&format!(" · {} ms", turn.duration_ms));
+    // A running session's last turn is still streaming: render it once as
+    // the live turn below instead of showing it twice (loop + streaming
+    // tail).
+    let live_turn_idx = if run.status == RunSessionStatus::Running {
+        run.transcript
+            .turns
+            .len()
+            .checked_sub(1)
+            .filter(|i| run.transcript.turns[*i].stop_reason.is_empty())
+    } else {
+        None
+    };
+    for (i, turn) in run.transcript.turns.iter().enumerate() {
+        if Some(i) == live_turn_idx {
+            continue;
         }
-        if !turn.stop_reason.is_empty() {
-            meta.push_str(&format!(" · stop {}", turn.stop_reason));
-        }
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("── turn {} ", turn.number),
-                Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(meta, Style::default().fg(Color::DarkGray)),
-        ]));
-        let text: String = turn.llm_text.chars().take(4_000).collect();
-        for chunk in wrap_chunks(&text, max_w) {
-            lines.push(Line::styled(chunk, Style::default()));
-        }
-        for tc in &turn.tool_calls {
-            let ok = tc.status == "success";
-            let mut spans = vec![Span::styled(
-                format!("{} {} ", if ok { "✔" } else { "✘" }, tc.name),
-                Style::default().fg(if ok { Color::Green } else { Color::Red }),
-            )];
-            spans.push(Span::styled(
-                format!("({} ms)", tc.duration_ms),
-                Style::default().fg(Color::DarkGray),
-            ));
-            if let Some(err) = &tc.error {
-                spans.push(Span::styled(
-                    format!(" — {}", truncate(err, 120)),
-                    Style::default().fg(Color::Red),
-                ));
-            }
-            lines.push(Line::from(spans));
-        }
+        push_turn(&mut lines, turn, max_w);
     }
-    // Live streaming tail of the current turn.
-    if run.status == RunSessionStatus::Running {
-        if let Some(turn) = run.transcript.live_turn() {
-            if !turn.llm_text.is_empty() {
-                lines.push(Line::from(vec![Span::styled(
-                    format!("streaming… ({} deltas)", run.delta_count),
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                )]));
-                let tail: String = turn
-                    .llm_text
-                    .chars()
-                    .rev()
-                    .take(max_w * 3)
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .rev()
-                    .collect();
-                for chunk in wrap_chunks(&tail, max_w) {
-                    lines.push(Line::styled(chunk, Style::default().fg(Color::Cyan)));
-                }
-            }
+    if let Some(i) = live_turn_idx {
+        let turn = &run.transcript.turns[i];
+        push_turn(&mut lines, turn, max_w);
+        if !turn.llm_text.is_empty() {
+            lines.push(Line::from(vec![Span::styled(
+                format!("streaming… ({} deltas)", run.delta_count),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )]));
         }
     }
     lines
 }
+
+/// Render one structured turn (header, text, tool calls).
+fn push_turn(lines: &mut Vec<Line<'static>>, turn: &crate::transcript::Turn, max_w: usize) {
+    let mut meta = String::new();
+    if turn.duration_ms > 0 {
+        meta.push_str(&format!(" · {} ms", turn.duration_ms));
+    }
+    if !turn.stop_reason.is_empty() {
+        meta.push_str(&format!(" · stop {}", turn.stop_reason));
+    }
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("── turn {} ", turn.number),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(meta, Style::default().fg(Color::DarkGray)),
+    ]));
+    let text: String = turn.llm_text.chars().take(TURN_TEXT_CAP).collect();
+    for chunk in wrap_chunks(&text, max_w) {
+        lines.push(Line::styled(chunk, Style::default()));
+    }
+    for tc in &turn.tool_calls {
+        let ok = tc.status == "success";
+        let mut spans = vec![Span::styled(
+            format!("{} {} ", if ok { "✔" } else { "✘" }, tc.name),
+            Style::default().fg(if ok { Color::Green } else { Color::Red }),
+        )];
+        spans.push(Span::styled(
+            format!("({} ms)", tc.duration_ms),
+            Style::default().fg(Color::DarkGray),
+        ));
+        if let Some(err) = &tc.error {
+            spans.push(Span::styled(
+                format!(" — {}", truncate(err, 120)),
+                Style::default().fg(Color::Red),
+            ));
+        }
+        lines.push(Line::from(spans));
+    }
+}
+
+/// Per-turn text cap in the transcript (chars) before eliding.
+const TURN_TEXT_CAP: usize = 4_000;
 
 /// Simple character-based wrapping (UTF-8 safe).
 fn wrap_chunks(text: &str, max_w: usize) -> Vec<String> {
@@ -252,7 +257,7 @@ fn draw_stats(f: &mut Frame, state: &State, area: Rect) {
                 run.provider_id,
                 run.model_id,
                 run.reasoning,
-                run.started.elapsed().as_secs(),
+                run.elapsed().as_secs(),
                 u.input_tokens,
                 u.output_tokens,
                 hit,

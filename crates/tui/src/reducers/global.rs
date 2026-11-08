@@ -38,7 +38,6 @@ impl State {
             Action::Quit => self.action_quit(),
             Action::ForceQuit => {
                 self.quit = true;
-                self.force_quit = true;
                 self.capture_prefs();
                 vec![Effect::SavePrefs]
             }
@@ -56,7 +55,9 @@ impl State {
             }
             Action::ScrollHistoryDetail(delta) => {
                 if let Some(Modal::HistoryDetail { text, scroll }) = &mut self.modal {
-                    let max = text.lines().count().saturating_sub(1);
+                    // Offset from bottom (0 = newest line visible), matching
+                    // the transcript convention.
+                    let max = text.lines().count();
                     *scroll = ((*scroll as i32 + delta).max(0) as usize).min(max);
                 }
                 Vec::new()
@@ -65,10 +66,7 @@ impl State {
                 self.modal = None;
                 Vec::new()
             }
-            Action::Notice(msg) => {
-                self.push_notice(msg);
-                Vec::new()
-            }
+            Action::FilterEdit(target, edit) => self.apply_filter_edit(target, edit),
             Action::Paste(text) => self.paste_text(text),
             Action::UiMsg(msg) => self.reduce_ui_msg(msg),
 
@@ -80,24 +78,72 @@ impl State {
                 if let Some(Modal::Palette { filter, .. }) = &mut self.modal {
                     filter.insert(c);
                 }
+                self.clamp_palette_cursor();
                 Vec::new()
             }
             Action::PaletteBackspace => {
                 if let Some(Modal::Palette { filter, .. }) = &mut self.modal {
                     filter.backspace();
                 }
+                self.clamp_palette_cursor();
                 Vec::new()
             }
             Action::PaletteMove(delta) => {
-                let len = self.palette_commands().len().max(1);
+                // Cycle within the *filtered* list, not the full command set.
+                let len = {
+                    let Some(Modal::Palette { filter, .. }) = &self.modal else {
+                        return Vec::new();
+                    };
+                    self.filtered_palette(filter.as_str()).len()
+                };
                 if let Some(Modal::Palette { cursor, .. }) = &mut self.modal {
-                    *cursor = (*cursor as i32 + delta).rem_euclid(len as i32) as usize;
+                    if len == 0 {
+                        *cursor = 0;
+                    } else {
+                        *cursor = (*cursor as i32 + delta).rem_euclid(len as i32) as usize;
+                    }
                 }
                 Vec::new()
             }
             Action::PaletteEnter => self.palette_enter(),
             Action::PaletteRunAction(idx) => self.palette_run(idx),
             _ => Vec::new(),
+        }
+    }
+
+    /// Apply a cursor-aware edit to an inline filter, then re-clamp whatever
+    /// the filter narrows (provider row cursor / map row cursor). Changing
+    /// the visible provider rows re-seats the selected provider so the model
+    /// list can never belong to a different provider.
+    fn apply_filter_edit(
+        &mut self,
+        target: crate::action::FilterTarget,
+        edit: crate::action::FilterEdit,
+    ) -> Vec<Effect> {
+        use crate::action::{FilterEdit as E, FilterTarget as T};
+        let field = match target {
+            T::Providers => &mut self.setup.provider_filter,
+            T::ReasoningMap => &mut self.map.filter,
+        };
+        match edit {
+            E::Insert(c) => field.insert(c),
+            E::Backspace => field.backspace(),
+            E::Delete => field.delete(),
+            E::Left => field.move_cursor(-1),
+            E::Right => field.move_cursor(1),
+            E::Home => field.move_home(),
+            E::End => field.move_end(),
+        }
+        match target {
+            T::Providers => {
+                self.clamp_provider_idx();
+                self.sync_selected_provider()
+            }
+            T::ReasoningMap => {
+                self.refresh_map_rows();
+                self.map.idx = self.map.idx.min(self.map_rows().len().saturating_sub(1));
+                Vec::new()
+            }
         }
     }
 
@@ -133,8 +179,7 @@ impl State {
                         c.cancel();
                     }
                 } else if run.status == RunSessionStatus::Pending {
-                    run.status = RunSessionStatus::Finished;
-                    run.finished_line = Some("■ cancelled (was queued)".into());
+                    run.cancel_while_pending();
                 }
             }
             self.cancel_requested = true;
@@ -177,14 +222,16 @@ impl State {
                 // Cache under the provider it was fetched for — enables
                 // cross-provider bulk without refetching.
                 let cache = CachedCatalog::from_catalog(&catalog, snapshot.clone());
-                let is_current = self
-                    .requested_models_for
-                    .as_deref()
-                    .map(|r| r == requested_for.as_str())
-                    .unwrap_or(false);
+                // Only adopt when the response belongs to the provider that
+                // is still selected: a stale in-flight fetch must not replace
+                // the current model list.
+                let is_current =
+                    self.setup.selected_provider_id.as_deref() == Some(requested_for.as_str());
                 self.setup
                     .catalog_cache
                     .insert(requested_for.clone(), cache);
+                // Cached catalogs feed the reasoning map's model metadata.
+                self.refresh_map_rows();
                 if is_current {
                     self.requested_models_for = None;
                     self.setup.models_loading = false;
@@ -195,10 +242,10 @@ impl State {
                     {
                         let cached = self.setup.catalog_cache.get(&requested_for).cloned();
                         if let Some(cache) = cached {
+                            // adopt_catalog re-seats `restore_model_id` and
+                            // snaps the reasoning display itself.
                             self.adopt_catalog(&cache);
                         }
-                        self.restore_last_model();
-                        self.snap_reasoning_to_default();
                     }
                 }
                 Vec::new()
@@ -211,11 +258,17 @@ impl State {
                 let mut failure_notice = None;
                 if let Some(run) = self.runs.find_mut(run_id) {
                     run.status = RunSessionStatus::Finished;
+                    run.finished_at = Some(Instant::now());
                     run.finished_line = Some(match &result {
                         Ok(outcome) => {
                             let s = &outcome.stats;
                             run.final_text = outcome.final_text.clone();
                             run.run_dir = Some(outcome.run_dir.clone());
+                            if let Some(err) = &outcome.persistence_error {
+                                // The run executed but an artifact is missing:
+                                // never report this as a clean success.
+                                failure_notice = Some(format!("⚠ artifacts incomplete: {err}"));
+                            }
                             format!(
                                 "■ {} — cost {} USD — statistics: {}/statistics.json",
                                 s.status.as_str(),
@@ -237,11 +290,15 @@ impl State {
                 if let Some(notice) = failure_notice {
                     self.push_notice(notice);
                 }
+                // Keep the finished backlog bounded (running/pending kept).
+                self.runs
+                    .prune_finished(crate::state::MAX_FINISHED_SESSIONS);
                 // A slot freed up: promote queued runs.
                 self.promote_pending()
             }
             crate::UiMsg::SnapshotLoaded(snapshot) => {
                 self.snapshot_all = Some(snapshot);
+                self.refresh_map_rows();
                 self.map.idx = self.map.idx.min(self.map_rows().len().saturating_sub(1));
                 Vec::new()
             }
@@ -281,14 +338,6 @@ impl State {
             self.push_notice(format!("queued run {model} started"));
         }
         effects
-    }
-
-    fn restore_last_model(&mut self) {
-        if let Some(mid) = &self.prefs.last_model {
-            if let Some(idx) = self.setup.models.iter().position(|m| &m.id == mid) {
-                self.setup.model_idx = idx;
-            }
-        }
     }
 
     // ---- paste ------------------------------------------------------------
@@ -373,19 +422,40 @@ impl State {
     }
 
     fn palette_enter(&mut self) -> Vec<Effect> {
-        let Some(Modal::Palette { filter, cursor }) = &self.modal else {
+        let commands = {
+            let Some(Modal::Palette { filter, .. }) = &self.modal else {
+                return Vec::new();
+            };
+            self.filtered_palette(filter.as_str())
+        };
+        if commands.is_empty() {
+            self.push_notice("no matching command");
+            return Vec::new();
+        }
+        let Some(Modal::Palette { cursor, .. }) = &self.modal else {
             return Vec::new();
         };
-        let (cmd, _, enabled) = match self.filtered_palette(filter.as_str()).get(*cursor) {
-            Some(c) => c.clone(),
-            None => return Vec::new(),
-        };
+        let idx = (*cursor).min(commands.len() - 1);
+        let (cmd, _, enabled) = commands[idx].clone();
         if !enabled {
             self.push_notice("that command is not available right now");
             return Vec::new();
         }
         self.modal = None;
         self.run_palette_cmd(cmd)
+    }
+
+    /// Keep the palette cursor inside the current filtered result set.
+    fn clamp_palette_cursor(&mut self) {
+        let len = {
+            let Some(Modal::Palette { filter, .. }) = &self.modal else {
+                return;
+            };
+            self.filtered_palette(filter.as_str()).len()
+        };
+        if let Some(Modal::Palette { cursor, .. }) = &mut self.modal {
+            *cursor = (*cursor).min(len.saturating_sub(1));
+        }
     }
 
     fn palette_run(&mut self, idx: usize) -> Vec<Effect> {

@@ -22,6 +22,10 @@ use lmhub_core::{
 };
 use std::sync::Arc;
 
+/// Watsonx default host/version when the env does not override them.
+const WATSONX_DEFAULT_HOST: &str = "https://eu-de.ml.cloud.ibm.com";
+const WATSONX_API_VERSION: &str = "2024-05-31";
+
 pub struct RoutedProvider {
     pub id: String,
     pub display_name: String,
@@ -29,7 +33,8 @@ pub struct RoutedProvider {
     /// Static base URL from the catalog/TOML; dynamic protocols resolve
     /// their own URLs at call time.
     pub base_url: Option<String>,
-    pub env_keys: Vec<String>,
+    /// Credential-bearing env vars only (catalog `key_envs`).
+    pub key_envs: Vec<String>,
     pub local_models: Vec<LocalModel>,
     pub models_dev_id: String,
     pub requires_key: bool,
@@ -45,7 +50,7 @@ impl RoutedProvider {
         display_name: String,
         protocol: ProtocolKind,
         base_url: Option<String>,
-        env_keys: Vec<String>,
+        key_envs: Vec<String>,
         models_dev_id: String,
         requires_key: bool,
         auth_store: Arc<std::sync::Mutex<AuthStore>>,
@@ -56,7 +61,7 @@ impl RoutedProvider {
             display_name,
             protocol,
             base_url,
-            env_keys,
+            key_envs,
             local_models,
             models_dev_id,
             requires_key,
@@ -73,13 +78,23 @@ impl RoutedProvider {
         if !self.requires_key {
             return Ok(String::new());
         }
+        // Catalog regression guard: `key_envs` must never contain display-only
+        // vars (that bug made `AZURE_RESOURCE_NAME` an "API key").
+        debug_assert!(
+            self.key_envs
+                .iter()
+                .all(|k| crate::known::is_secret_like_env_name(k)),
+            "provider `{}` passed non-credential env vars to key resolution: {:?}",
+            self.id,
+            self.key_envs
+        );
         let resolved = {
             let store = self.store();
-            credentials::resolve(&store, &self.id, &self.env_keys)
+            credentials::resolve(&store, &self.id, &self.key_envs)
         };
         resolved
             .map(|c| c.secret)
-            .ok_or_else(|| credentials::missing_error(&self.id, &self.env_keys))
+            .ok_or_else(|| credentials::missing_error(&self.id, &self.key_envs))
     }
 
     async fn chat_openai_wire(
@@ -138,11 +153,11 @@ impl Provider for RoutedProvider {
     }
 
     fn api_key_env(&self) -> &str {
-        self.env_keys.first().map(String::as_str).unwrap_or("-")
+        self.key_envs.first().map(String::as_str).unwrap_or("-")
     }
 
     fn env_keys(&self) -> Vec<String> {
-        self.env_keys.clone()
+        self.key_envs.clone()
     }
 
     fn requires_credentials(&self) -> bool {
@@ -162,6 +177,10 @@ impl Provider for RoutedProvider {
             self.protocol,
             ProtocolKind::OpenAiCompat | ProtocolKind::GeminiNative | ProtocolKind::Copilot
         ) && self.base_url.is_some()
+    }
+
+    fn supports_device_flow(&self) -> bool {
+        matches!(self.protocol, ProtocolKind::Copilot)
     }
 
     fn caps(&self) -> ProviderCaps {
@@ -222,112 +241,127 @@ impl Provider for RoutedProvider {
     }
 
     async fn chat(&self, request: &ChatRequest) -> Result<ChatResponse> {
-        match self.protocol {
-            ProtocolKind::OpenAiCompat => {
-                let base = self.base_url.clone().ok_or_else(|| {
-                    CoreError::Other(format!(
-                        "provider `{}` has no API URL — configure base_url in providers/*.toml",
-                        self.id
-                    ))
-                })?;
-                let key = self.key().await?;
-                let url = format!("{}/chat/completions", base.trim_end_matches('/'));
-                let headers = vec![("authorization".to_string(), format!("Bearer {key}"))];
-                self.chat_openai_wire(url, headers, request).await
-            }
-            ProtocolKind::OpenAiCompatIbmIam => {
-                let api_key = self.key().await?;
-                let token = preauth::ibm_iam_token(&api_key).await?;
-                let host = std::env::var("WATSONX_AI_URL")
-                    .unwrap_or_else(|_| "https://eu-de.ml.cloud.ibm.com".into());
-                let project = std::env::var("WATSONX_AI_PROJECT_ID")
-                    .map_err(|_| CoreError::Other("watsonx: set WATSONX_AI_PROJECT_ID".into()))?;
-                let url = format!(
-                    "{}/ml/v1/text/chat?version=2024-05-31&project_id={project}",
-                    host.trim_end_matches('/')
-                );
-                let headers = vec![("authorization".to_string(), format!("Bearer {token}"))];
-                self.chat_openai_wire(url, headers, request).await
-            }
-            ProtocolKind::OpenAiCompatOauthCc => {
-                let (base, token) = self.sap_ai_core_endpoint().await?;
-                let url = format!("{base}/v2/chat/completions");
-                let headers = vec![("authorization".to_string(), format!("Bearer {token}"))];
-                self.chat_openai_wire(url, headers, request).await
-            }
-            ProtocolKind::AnthropicCompat => {
-                let base = self.base_url.clone().ok_or_else(|| missing_base(self))?;
-                let key = self.key().await?;
-                let url = format!("{}/messages", base.trim_end_matches('/'));
-                let headers = vec![
-                    ("x-api-key".to_string(), key),
-                    ("anthropic-version".to_string(), "2023-06-01".into()),
-                ];
-                let started = std::time::Instant::now();
-                let payload = crate::wire_anthropic::build_chat_payload(
-                    request,
-                    crate::wire_anthropic::AnthropicWireOpts {
-                        supports_thinking: true,
-                    },
-                );
-                let body = http::post_json(&self.http, &url, headers, &payload).await?;
-                crate::wire_anthropic::parse_chat_response(
-                    &body,
-                    started.elapsed().as_millis() as u64,
-                    Vec::new(),
-                )
-            }
-            ProtocolKind::Azure => {
-                // The two catalog entries use different env names for the
-                // resource (and different default domains).
-                let resource_env = if self.id == "azure-cognitive-services" {
-                    "AZURE_COGNITIVE_SERVICES_RESOURCE_NAME"
-                } else {
-                    "AZURE_RESOURCE_NAME"
-                };
-                let base = azure::resolve_base(self.base_url.as_deref(), resource_env)?;
-                let key = self.key().await?;
-                azure::chat(&self.http, &base, &key, request).await
-            }
-            ProtocolKind::GeminiNative => {
-                let base = self.base_url.clone().ok_or_else(|| missing_base(self))?;
-                let key = self.key().await?;
-                gemini::chat(&self.http, &base, &key, request).await
-            }
-            ProtocolKind::VertexGemini => {
-                vertex::chat(&self.http, false, request, &self.auth_store).await
-            }
-            ProtocolKind::VertexAnthropic => {
-                vertex::chat(&self.http, true, request, &self.auth_store).await
-            }
-            ProtocolKind::Bedrock => bedrock::chat(&self.http, request, &self.auth_store).await,
-            ProtocolKind::Cohere => {
-                let base = self.base_url.clone().ok_or_else(|| missing_base(self))?;
-                let key = self.key().await?;
-                cohere::chat(&self.http, &base, &key, request).await
-            }
-            ProtocolKind::GitLabDuo => {
-                let base = self
-                    .base_url
-                    .clone()
-                    .or_else(|| std::env::var("GITLAB_AI_GATEWAY_URL").ok())
-                    .ok_or_else(|| missing_base(self))?;
-                let key = self.key().await?;
-                let url = format!("{}/chat/completions", base.trim_end_matches('/'));
-                let headers = vec![("authorization".to_string(), format!("Bearer {key}"))];
-                self.chat_openai_wire(url, headers, request).await
-            }
-            ProtocolKind::Copilot => {
-                let base = self
-                    .base_url
-                    .clone()
-                    .unwrap_or_else(|| "https://api.githubcopilot.com".into());
-                let token = copilot_live_token(&self.auth_store).await?;
-                let url = format!("{}/chat/completions", base.trim_end_matches('/'));
-                self.chat_openai_wire(url, copilot_headers(&token), request)
-                    .await
+        // Enforce protocol capabilities before building any wire payload:
+        // never advertise tools/caching the route cannot carry.
+        let mut warnings: Vec<String> = Vec::new();
+        let effective = self.effective_request(request, &mut warnings);
+        let request = &effective;
+        let result = async {
+            match self.protocol {
+                ProtocolKind::OpenAiCompat => {
+                    let base = self.base_url.clone().ok_or_else(|| {
+                        CoreError::Other(format!(
+                            "provider `{}` has no API URL — configure base_url in providers/*.toml",
+                            self.id
+                        ))
+                    })?;
+                    let key = self.key().await?;
+                    let url = format!("{}/chat/completions", base.trim_end_matches('/'));
+                    let headers = vec![("authorization".to_string(), format!("Bearer {key}"))];
+                    self.chat_openai_wire(url, headers, request).await
+                }
+                ProtocolKind::OpenAiCompatIbmIam => {
+                    let api_key = self.key().await?;
+                    let token = preauth::ibm_iam_token(&api_key).await?;
+                    let host = std::env::var("WATSONX_AI_URL")
+                        .unwrap_or_else(|_| WATSONX_DEFAULT_HOST.into());
+                    let project = std::env::var("WATSONX_AI_PROJECT_ID").map_err(|_| {
+                        CoreError::Other("watsonx: set WATSONX_AI_PROJECT_ID".into())
+                    })?;
+                    let url = format!(
+                        "{}/ml/v1/text/chat?version={WATSONX_API_VERSION}&project_id={project}",
+                        host.trim_end_matches('/')
+                    );
+                    let headers = vec![("authorization".to_string(), format!("Bearer {token}"))];
+                    self.chat_openai_wire(url, headers, request).await
+                }
+                ProtocolKind::OpenAiCompatOauthCc => {
+                    let (base, token) = self.sap_ai_core_endpoint().await?;
+                    let url = format!("{base}/v2/chat/completions");
+                    let headers = vec![("authorization".to_string(), format!("Bearer {token}"))];
+                    self.chat_openai_wire(url, headers, request).await
+                }
+                ProtocolKind::AnthropicCompat => {
+                    let base = self.base_url.clone().ok_or_else(|| missing_base(self))?;
+                    let key = self.key().await?;
+                    let url = format!("{}/messages", base.trim_end_matches('/'));
+                    let headers = vec![
+                        ("x-api-key".to_string(), key),
+                        ("anthropic-version".to_string(), "2023-06-01".into()),
+                    ];
+                    let started = std::time::Instant::now();
+                    let payload = crate::wire_anthropic::build_chat_payload(
+                        request,
+                        crate::wire_anthropic::AnthropicWireOpts {
+                            supports_thinking: true,
+                        },
+                    );
+                    let body = http::post_json(&self.http, &url, headers, &payload).await?;
+                    crate::wire_anthropic::parse_chat_response(
+                        &body,
+                        started.elapsed().as_millis() as u64,
+                        Vec::new(),
+                    )
+                }
+                ProtocolKind::Azure => {
+                    // The two catalog entries use different env names for the
+                    // resource (and different default domains).
+                    let resource_env = if self.id == "azure-cognitive-services" {
+                        "AZURE_COGNITIVE_SERVICES_RESOURCE_NAME"
+                    } else {
+                        "AZURE_RESOURCE_NAME"
+                    };
+                    let base = azure::resolve_base(self.base_url.as_deref(), resource_env)?;
+                    let key = self.key().await?;
+                    azure::chat(&self.http, &base, &key, request).await
+                }
+                ProtocolKind::GeminiNative => {
+                    let base = self.base_url.clone().ok_or_else(|| missing_base(self))?;
+                    let key = self.key().await?;
+                    gemini::chat(&self.http, &base, &key, request).await
+                }
+                ProtocolKind::VertexGemini => {
+                    vertex::chat(&self.http, false, request, &self.auth_store).await
+                }
+                ProtocolKind::VertexAnthropic => {
+                    vertex::chat(&self.http, true, request, &self.auth_store).await
+                }
+                ProtocolKind::Bedrock => bedrock::chat(&self.http, request, &self.auth_store).await,
+                ProtocolKind::Cohere => {
+                    let base = self.base_url.clone().ok_or_else(|| missing_base(self))?;
+                    let key = self.key().await?;
+                    cohere::chat(&self.http, &base, &key, request).await
+                }
+                ProtocolKind::GitLabDuo => {
+                    let base = self
+                        .base_url
+                        .clone()
+                        .or_else(|| std::env::var("GITLAB_AI_GATEWAY_URL").ok())
+                        .ok_or_else(|| missing_base(self))?;
+                    let key = self.key().await?;
+                    let url = format!("{}/chat/completions", base.trim_end_matches('/'));
+                    let headers = vec![("authorization".to_string(), format!("Bearer {key}"))];
+                    self.chat_openai_wire(url, headers, request).await
+                }
+                ProtocolKind::Copilot => {
+                    let base = self
+                        .base_url
+                        .clone()
+                        .unwrap_or_else(|| "https://api.githubcopilot.com".into());
+                    let token = copilot_live_token(&self.auth_store).await?;
+                    let url = format!("{}/chat/completions", base.trim_end_matches('/'));
+                    self.chat_openai_wire(url, copilot_headers(&token), request)
+                        .await
+                }
             }
         }
+        .await;
+        result.map(|mut resp| {
+            let mut all = warnings;
+            all.append(&mut resp.warnings);
+            resp.warnings = all;
+            resp
+        })
     }
 
     /// Streaming variant. Protocols without SSE support fall back to the
@@ -438,13 +472,13 @@ impl RoutedProvider {
             ProtocolKind::OpenAiCompatIbmIam => {
                 let api_key = self.key().await?;
                 let token = preauth::ibm_iam_token(&api_key).await?;
-                let host = std::env::var("WATSONX_AI_URL")
-                    .unwrap_or_else(|_| "https://eu-de.ml.cloud.ibm.com".into());
+                let host =
+                    std::env::var("WATSONX_AI_URL").unwrap_or_else(|_| WATSONX_DEFAULT_HOST.into());
                 let project = std::env::var("WATSONX_AI_PROJECT_ID")
                     .map_err(|_| CoreError::Other("watsonx: set WATSONX_AI_PROJECT_ID".into()))?;
                 Ok((
                     format!(
-                        "{}/ml/v1/text/chat?version=2024-05-31&project_id={project}",
+                        "{}/ml/v1/text/chat?version={WATSONX_API_VERSION}&project_id={project}",
                         host.trim_end_matches('/')
                     ),
                     vec![("authorization".to_string(), format!("Bearer {token}"))],
@@ -542,8 +576,17 @@ async fn copilot_live_token(store_lock: &std::sync::Mutex<AuthStore>) -> Result<
 fn copilot_headers(token: &str) -> Vec<(String, String)> {
     vec![
         ("authorization".to_string(), format!("Bearer {token}")),
-        ("editor-version".to_string(), "vscode/1.95.0".into()),
-        ("editor-plugin-version".to_string(), "copilot/1.0".into()),
+        ("editor-version".to_string(), copilot::editor_version()),
+        (
+            "editor-plugin-version".to_string(),
+            copilot::EDITOR_PLUGIN_VERSION.into(),
+        ),
+        (
+            "copilot-integration-id".to_string(),
+            copilot::INTEGRATION_ID.into(),
+        ),
+        // Programmatic agent traffic (not user-initiated typing).
+        ("x-initiator".to_string(), "agent".into()),
         ("user-agent".to_string(), "lmhub-runner".into()),
     ]
 }
@@ -556,14 +599,57 @@ fn is_chat_model(m: &serde_json::Value) -> bool {
 }
 
 impl RoutedProvider {
-    /// Catalog providers are optimistic by default: per-model capability
-    /// flags from Models.dev narrow this down at selection time, and
-    /// unsupported optional params degrade via adapter retries.
+    /// Request as the route will actually carry it: tools stripped when the
+    /// protocol cannot use them, prompt caching disabled when unsupported.
+    fn effective_request(&self, request: &ChatRequest, warnings: &mut Vec<String>) -> ChatRequest {
+        let caps = self.protocol_caps();
+        let mut effective = request.clone();
+        if !caps.prompt_caching {
+            effective.enable_prompt_cache = false;
+        }
+        if !caps.tool_calls && !effective.tools.is_empty() {
+            effective.tools.clear();
+            warnings.push(format!(
+                "provider `{}` protocol does not support tools; tools stripped",
+                self.id
+            ));
+        }
+        effective
+    }
+
+    /// Per-protocol capability truth (AGENTS invariant 2: adapters must not
+    /// over-claim). Per-model flags from Models.dev narrow this further at
+    /// selection time; unsupported optional params still degrade via adapter
+    /// retries, but we never *advertise* a feature the wire cannot carry.
     fn protocol_caps(&self) -> ProviderCaps {
-        ProviderCaps {
-            tool_calls: true,
-            reasoning: true,
-            prompt_caching: true,
+        match self.protocol {
+            // Converse: tools yes; thinking is not sent by our adapter and
+            // prompt caching (cachePoint) is not implemented.
+            ProtocolKind::Bedrock => ProviderCaps {
+                tool_calls: true,
+                reasoning: false,
+                prompt_caching: false,
+            },
+            // Cohere v2: tools yes; reasoning config is not part of the wire.
+            ProtocolKind::Cohere => ProviderCaps {
+                tool_calls: true,
+                reasoning: false,
+                prompt_caching: false,
+            },
+            // Gemini: thinkingConfig is sent; implicit caching is server-side
+            // but nothing in our payload controls it.
+            ProtocolKind::GeminiNative | ProtocolKind::VertexGemini => ProviderCaps {
+                tool_calls: true,
+                reasoning: true,
+                prompt_caching: false,
+            },
+            // OpenAI/Anthropic wires carry all three when the model supports
+            // them; the model's own flags decide at selection time.
+            _ => ProviderCaps {
+                tool_calls: true,
+                reasoning: true,
+                prompt_caching: true,
+            },
         }
     }
 }

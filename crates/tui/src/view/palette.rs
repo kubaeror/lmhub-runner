@@ -12,17 +12,25 @@ use ratatui::{
     Frame,
 };
 
-pub fn draw(f: &mut Frame, state: &State, modal: &Modal) {
+/// Modal sizes `(percent width, rows)` — one place to tune the overlays.
+const KEY_MODAL: (u16, u16) = (60, 5);
+const PALETTE_MODAL: (u16, u16) = (55, 12);
+const BULK_MODAL: (u16, u16) = (55, 14);
+const HELP_MODAL: (u16, u16) = (70, 20);
+const DETAIL_MODAL: (u16, u16) = (70, 16);
+const RUN_DETAIL_MODAL: (u16, u16) = (70, 18);
+/// Final-answer preview cap and wrap width in the run-detail modal.
+const FINAL_TEXT_CAP: usize = 1_200;
+const FINAL_TEXT_WRAP: usize = 100;
+
+pub fn draw(f: &mut Frame, state: &State, modal: &Modal, info: &mut crate::view::RenderInfo) {
     match modal {
         Modal::EnterKey { provider_id, input } => {
-            draw_key_entry(
-                f,
-                provider_id,
-                input.as_str(),
-                state.setup.focus == crate::state::Pane::Providers,
-            );
+            draw_key_entry(f, provider_id, input);
         }
-        Modal::Palette { filter, cursor } => draw_palette(f, state, filter.as_str(), *cursor),
+        Modal::Palette { filter, cursor } => {
+            info.palette_list = Some(draw_palette(f, state, filter.as_str(), *cursor));
+        }
         Modal::Help => draw_help(f, state),
         Modal::BulkConfirm => draw_bulk_confirm(f, state),
         Modal::HistoryDetail { text, scroll } => {
@@ -48,19 +56,27 @@ fn modal_frame(f: &mut Frame, area: Rect, title: String) -> Rect {
     inner
 }
 
-fn draw_key_entry(f: &mut Frame, provider_id: &str, input: &str, _focused: bool) {
-    let area = centered_rect(f.area(), 60, 5);
+fn draw_key_entry(f: &mut Frame, provider_id: &str, input: &crate::input::EditField) {
+    let area = centered_rect(f.area(), KEY_MODAL.0, KEY_MODAL.1);
     let inner = modal_frame(
         f,
         area,
         format!(" API key for {provider_id} (Enter=save, Esc=cancel) "),
     );
-    let shown = format!("{}|", "•".repeat(input.chars().count()));
+    // Real caret: bullets before the cursor, a caret glyph, then the rest.
+    let text = input.as_str();
+    let before = text[..input.cursor()].chars().count();
+    let total = text.chars().count();
+    let shown = format!(
+        "{}▏{}",
+        "•".repeat(before),
+        "•".repeat(total.saturating_sub(before))
+    );
     f.render_widget(Paragraph::new(shown), inner);
 }
 
-fn draw_palette(f: &mut Frame, state: &State, filter: &str, cursor: usize) {
-    let area = centered_rect(f.area(), 55, 12);
+fn draw_palette(f: &mut Frame, state: &State, filter: &str, cursor: usize) -> Rect {
+    let area = centered_rect(f.area(), PALETTE_MODAL.0, PALETTE_MODAL.1);
     let inner = modal_frame(f, area, " Commands (type to filter, Esc closes) ".into());
 
     let rows = ratatui::layout::Layout::default()
@@ -98,6 +114,8 @@ fn draw_palette(f: &mut Frame, state: &State, filter: &str, cursor: usize) {
     let mut st =
         ListState::default().with_selected(Some(cursor.min(commands.len().saturating_sub(1))));
     f.render_stateful_widget(list, rows[1], &mut st);
+    // Not indented by a border: render_stateful_widget does not add one here.
+    rows[1]
 }
 
 fn cmd_icon(cmd: PaletteCmd) -> &'static str {
@@ -113,7 +131,7 @@ fn cmd_icon(cmd: PaletteCmd) -> &'static str {
 
 fn draw_bulk_confirm(f: &mut Frame, state: &State) {
     let specs = state.bulk_specs();
-    let area = centered_rect(f.area(), 55, 14);
+    let area = centered_rect(f.area(), BULK_MODAL.0, BULK_MODAL.1);
     let inner = modal_frame(
         f,
         area,
@@ -175,7 +193,7 @@ fn draw_bulk_confirm(f: &mut Frame, state: &State) {
 
 /// Keybinding help overlay: global bindings + the current screen's.
 fn draw_help(f: &mut Frame, state: &State) {
-    let area = centered_rect(f.area(), 70, 20);
+    let area = centered_rect(f.area(), HELP_MODAL.0, HELP_MODAL.1);
     let inner = modal_frame(f, area, " Keybindings (? closes) ".into());
     let help_lines = crate::bindings::help_lines(state.screen);
     let lines: Vec<Line> = help_lines
@@ -198,12 +216,14 @@ fn draw_help(f: &mut Frame, state: &State) {
 
 /// Scrollable pretty-printed text modal (statistics detail).
 fn draw_detail(f: &mut Frame, text: &str, scroll: usize, title: &str) {
-    let area = centered_rect(f.area(), 70, 16);
+    let area = centered_rect(f.area(), DETAIL_MODAL.0, DETAIL_MODAL.1);
     let inner = modal_frame(f, area, title.into());
     let all_lines: Vec<&str> = text.lines().collect();
-    let max = all_lines.len().saturating_sub(1);
-    let start = scroll.min(max);
-    let end = (start + inner.height as usize).min(all_lines.len());
+    // Same "offset from bottom" convention as the transcript: 0 = newest
+    // line at the bottom, increasing values scroll back.
+    let back = scroll.min(all_lines.len());
+    let end = all_lines.len() - back;
+    let start = end.saturating_sub(inner.height as usize);
     let lines: Vec<Line> = all_lines[start..end]
         .iter()
         .map(|l| Line::raw(*l))
@@ -222,7 +242,7 @@ fn draw_run_detail(f: &mut Frame, state: &State, run_id: u64) {
     let Some(run) = state.runs.find(run_id) else {
         return;
     };
-    let area = centered_rect(f.area(), 70, 18);
+    let area = centered_rect(f.area(), RUN_DETAIL_MODAL.0, RUN_DETAIL_MODAL.1);
     let inner = modal_frame(
         f,
         area,
@@ -257,7 +277,12 @@ fn draw_run_detail(f: &mut Frame, state: &State, run_id: u64) {
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         )));
-        for chunk in text.chars().take(1_200).collect::<Vec<_>>().chunks(100) {
+        for chunk in text
+            .chars()
+            .take(FINAL_TEXT_CAP)
+            .collect::<Vec<_>>()
+            .chunks(FINAL_TEXT_WRAP)
+        {
             lines.push(Line::from(String::from_iter(chunk)));
         }
     }

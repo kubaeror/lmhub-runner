@@ -61,20 +61,36 @@ pub fn highlighted(text: &str, query: &str, base: Style, highlight: Style) -> Ve
     out
 }
 
+/// How long a transient notice stays in the status line.
+const NOTICE_TTL_SECS: u64 = 6;
+
+/// Command-isolation label, always visible in the status line: the user must
+/// be able to tell whether `run_command` is sandboxed, unsandboxed, or off.
+fn isolation_label(state: &State) -> &'static str {
+    match &state.sandbox_runtime {
+        lmhub_sandbox::SandboxRuntime::Bwrap(_) => "[cmd: bwrap]",
+        lmhub_sandbox::SandboxRuntime::Legacy if state.config.legacy_commands_allowed() => {
+            "[cmd: legacy/unsandboxed]"
+        }
+        lmhub_sandbox::SandboxRuntime::Legacy => "[cmd: disabled]",
+    }
+}
+
 /// Footer status text: fresh notice, else the selected run's status.
 pub fn status_line(state: &State) -> String {
+    let iso = isolation_label(state);
     if let Some((msg, at)) = &state.notice {
-        if at.elapsed().as_secs() < 6 {
-            return format!("ⓘ {msg} ");
+        if at.elapsed().as_secs() < NOTICE_TTL_SECS {
+            return format!("{iso} ⓘ {msg} ");
         }
     }
     if let Some(run) = state.runs.selected_run() {
         return format!(
-            "{} {} [{}] — running {}s{} ",
+            "{iso} {} {} [{}] — running {}s{} ",
             run.provider_id,
             run.model_id,
             run.reasoning,
-            run.started.elapsed().as_secs(),
+            run.elapsed().as_secs(),
             if run.status != crate::state::RunSessionStatus::Running {
                 " (done)"
             } else {
@@ -82,7 +98,7 @@ pub fn status_line(state: &State) -> String {
             }
         );
     }
-    String::new()
+    iso.to_string()
 }
 
 pub fn hints(state: &State) -> String {

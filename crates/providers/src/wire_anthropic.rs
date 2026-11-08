@@ -36,8 +36,19 @@ pub fn thinking_budget(level: ReasoningLevel) -> Option<u32> {
     }
 }
 
+/// Effective budget: the model's declared value when present, else the
+/// per-level default. `off` never enables thinking.
+fn budget_for(req: &ChatRequest) -> Option<u32> {
+    if req.reasoning == ReasoningLevel::Off {
+        return None;
+    }
+    req.thinking_budget
+        .or_else(|| thinking_budget(req.reasoning))
+}
+
 pub fn build_chat_payload(req: &ChatRequest, opts: AnthropicWireOpts) -> Value {
-    let budget = thinking_budget(req.reasoning);
+    // A model-declared budget (models.dev) wins over the level constants.
+    let budget = budget_for(req);
     let thinking_enabled = opts.supports_thinking && budget.is_some();
 
     // Thinking requires max_tokens > budget_tokens.
@@ -339,10 +350,8 @@ mod tests {
 
 use std::collections::BTreeMap;
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 enum BlockAcc {
-    #[default]
-    Empty,
     Text(String),
     Thinking {
         thinking: String,
@@ -351,8 +360,13 @@ enum BlockAcc {
     Tool {
         id: String,
         name: String,
+        /// `input` from `content_block_start` when the server sends it there.
+        initial: Value,
         json: String,
     },
+    /// A block the accumulator does not interpret (e.g. `redacted_thinking`):
+    /// preserved verbatim so `raw_assistant_message` stays wire-faithful.
+    Raw(Value),
 }
 
 /// Accumulates Anthropic SSE events (`message_start` … `message_stop`)
@@ -410,9 +424,15 @@ impl AnthropicStreamAccumulator {
                             .and_then(|v| v.as_str())
                             .unwrap_or_default()
                             .into(),
+                        // Some servers send the complete `input` in the start
+                        // event (no input_json_delta follows).
+                        initial: block.get("input").cloned().unwrap_or(Value::Null),
                         json: String::new(),
                     },
-                    _ => BlockAcc::Empty,
+                    // redacted_thinking (and any future block type): keep it
+                    // verbatim — dropping it breaks signed-thinking
+                    // round-trips.
+                    _ => BlockAcc::Raw(block.clone()),
                 };
                 self.order.push(index);
                 self.blocks.insert(index, acc);
@@ -490,6 +510,22 @@ impl AnthropicStreamAccumulator {
 
     /// Assemble the final response (call on `message_stop` / stream end).
     pub fn finish(self, duration_ms: u64) -> Result<ChatResponse> {
+        // Same contract as the OpenAI accumulator: a stream with no content
+        // blocks and no token accounting is a provider-side anomaly (rate
+        // limit, unavailable model), not an empty successful answer.
+        if self.blocks.is_empty()
+            && self.base_input == 0
+            && self.output_tokens == 0
+            && self.cache_read.unwrap_or(0) == 0
+            && self.cache_write.unwrap_or(0) == 0
+        {
+            return Err(CoreError::Parse(
+                "provider returned an empty stream (no content blocks or usage) — usually a rate \
+                 limit, an unavailable model, or a reasoning level the model rejects; check the \
+                 provider's quota and the requested reasoning level"
+                    .into(),
+            ));
+        }
         let mut text_parts = Vec::new();
         let mut thinking_parts = Vec::new();
         let mut tool_calls = Vec::new();
@@ -512,8 +548,19 @@ impl AnthropicStreamAccumulator {
                     }));
                     thinking_parts.push(thinking.clone());
                 }
-                Some(BlockAcc::Tool { id, name, json }) => {
-                    let arguments: Value = serde_json::from_str(json).unwrap_or_else(|_| json!({}));
+                Some(BlockAcc::Tool {
+                    id,
+                    name,
+                    initial,
+                    json,
+                }) => {
+                    let arguments: Value = if !json.trim().is_empty() {
+                        serde_json::from_str(json).unwrap_or_else(|_| json!({}))
+                    } else if initial.as_object().is_some_and(|o| !o.is_empty()) {
+                        initial.clone()
+                    } else {
+                        json!({})
+                    };
                     raw_blocks.push(json!({
                         "type": "tool_use",
                         "id": id,
@@ -526,6 +573,9 @@ impl AnthropicStreamAccumulator {
                         arguments,
                     });
                 }
+                // Unknown/redacted blocks are not actionable but must survive
+                // the round-trip (wire fidelity invariant).
+                Some(BlockAcc::Raw(v)) => raw_blocks.push(v.clone()),
                 _ => {}
             }
         }
@@ -624,5 +674,148 @@ mod stream_tests {
         assert_eq!(raw[0]["type"], json!("thinking"));
         assert_eq!(raw[0]["signature"], json!("sig1"));
         assert_eq!(raw[2]["input"]["path"], json!("a.txt"));
+    }
+
+    #[test]
+    fn redacted_thinking_blocks_survive_streaming() {
+        let mut acc = AnthropicStreamAccumulator::new();
+        let redacted = json!({
+            "type": "redacted_thinking",
+            "data": "EmwKAhgBEgy3va3pzix/LcebL79jAQ==",
+        });
+        let _ = acc.feed(
+            Some("content_block_start"),
+            &json!({"index": 0, "content_block": redacted}),
+        );
+        let _ = acc.feed(
+            Some("content_block_start"),
+            &json!({"index": 1, "content_block": {"type": "text"}}),
+        );
+        let _ = acc.feed(
+            Some("content_block_delta"),
+            &json!({"index": 1, "delta": {"type": "text_delta", "text": "answer"}}),
+        );
+        let _ = acc.feed(
+            Some("message_delta"),
+            &json!({"delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 3}}),
+        );
+
+        let resp = acc.finish(5).unwrap();
+        assert_eq!(resp.text, "answer");
+        let raw = resp.raw_assistant_message.expect("raw blocks");
+        assert_eq!(
+            raw[0], redacted,
+            "redacted_thinking must round-trip verbatim"
+        );
+        assert_eq!(raw[1]["type"], json!("text"));
+    }
+
+    /// Streaming and non-streaming must produce equivalent raw payloads for
+    /// the same logical response (wire fidelity invariant).
+    #[test]
+    fn stream_and_non_stream_raw_payloads_match() {
+        let content = json!([
+            {"type": "redacted_thinking", "data": "abc123"},
+            {"type": "text", "text": "hello"},
+        ]);
+        let body = json!({
+            "content": content,
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 10, "output_tokens": 2},
+        });
+        let non_stream = parse_chat_response(&body, 7, Vec::new()).unwrap();
+
+        let mut acc = AnthropicStreamAccumulator::new();
+        let _ = acc.feed(
+            Some("message_start"),
+            &json!({"message": {"usage": {"input_tokens": 10}}}),
+        );
+        let _ = acc.feed(
+            Some("content_block_start"),
+            &json!({"index": 0, "content_block": {"type": "redacted_thinking", "data": "abc123"}}),
+        );
+        let _ = acc.feed(
+            Some("content_block_start"),
+            &json!({"index": 1, "content_block": {"type": "text"}}),
+        );
+        let _ = acc.feed(
+            Some("content_block_delta"),
+            &json!({"index": 1, "delta": {"type": "text_delta", "text": "hello"}}),
+        );
+        let _ = acc.feed(
+            Some("message_delta"),
+            &json!({"delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 2}}),
+        );
+        let stream = acc.finish(7).unwrap();
+
+        assert_eq!(
+            stream.raw_assistant_message, non_stream.raw_assistant_message,
+            "streaming must not lose blocks the non-streaming parser keeps"
+        );
+        assert_eq!(stream.text, non_stream.text);
+        assert_eq!(stream.usage.input_tokens, non_stream.usage.input_tokens);
+    }
+
+    #[test]
+    fn empty_stream_is_parse_error() {
+        let err = AnthropicStreamAccumulator::new().finish(1).unwrap_err();
+        assert!(matches!(err, CoreError::Parse(_)), "{err:?}");
+    }
+
+    #[test]
+    fn model_declared_budget_overrides_the_level_constant() {
+        use crate::wire_test_util::sample_request;
+        let mut req = sample_request(ReasoningLevel::High);
+        req.thinking_budget = Some(5_000);
+        let p = build_chat_payload(
+            &req,
+            AnthropicWireOpts {
+                supports_thinking: true,
+            },
+        );
+        assert_eq!(p["thinking"]["budget_tokens"], json!(5_000));
+        assert_eq!(p["max_tokens"], json!(6_024), "budget + 1024 headroom");
+
+        // Without a declared budget the level constant still applies.
+        req.thinking_budget = None;
+        let p = build_chat_payload(
+            &req,
+            AnthropicWireOpts {
+                supports_thinking: true,
+            },
+        );
+        assert_eq!(p["thinking"]["budget_tokens"], json!(16_384));
+    }
+
+    #[test]
+    fn tool_use_input_from_start_event_is_kept() {
+        // Some servers send the complete input in `content_block_start` with
+        // no `input_json_delta` following.
+        let mut acc = AnthropicStreamAccumulator::new();
+        let _ = acc.feed(
+            Some("content_block_start"),
+            &json!({"index": 0, "content_block": {"type": "tool_use", "id": "tu1",
+                                                   "name": "read_file",
+                                                   "input": {"path": "a.txt"}}}),
+        );
+        let _ = acc.feed(
+            Some("message_delta"),
+            &json!({"delta": {"stop_reason": "tool_use"}}),
+        );
+        let resp = acc.finish(3).unwrap();
+        assert_eq!(resp.tool_calls[0].name, "read_file");
+        assert_eq!(resp.tool_calls[0].arguments["path"], json!("a.txt"));
+    }
+
+    #[test]
+    fn usage_only_stream_is_not_an_error() {
+        let mut acc = AnthropicStreamAccumulator::new();
+        let _ = acc.feed(
+            Some("message_start"),
+            &json!({"message": {"usage": {"input_tokens": 7}}}),
+        );
+        let resp = acc.finish(2).unwrap();
+        assert!(resp.text.is_empty());
+        assert_eq!(resp.usage.input_tokens, 7);
     }
 }

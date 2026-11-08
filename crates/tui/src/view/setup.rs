@@ -334,7 +334,9 @@ fn draw_reasoning(f: &mut Frame, state: &State, area: ratatui::layout::Rect) {
         .min(levels.len().saturating_sub(1));
     let default = state
         .selected_model()
-        .and_then(|m| state.prefs.model_defaults.get(&m.id).copied());
+        .map(|m| m.id.clone())
+        .zip(state.selected_provider_id())
+        .and_then(|(mid, pid)| state.default_reasoning_for(&pid, &mid));
     let spans: Vec<Span> = levels
         .iter()
         .enumerate()
@@ -370,82 +372,78 @@ fn draw_reasoning(f: &mut Frame, state: &State, area: ratatui::layout::Rect) {
     );
 }
 
-fn draw_prompts(f: &mut Frame, state: &State, area: ratatui::layout::Rect) {
-    let items: Vec<ListItem> = state
+/// One prompt picker (system or task prompts) — same rendering, different
+/// data source/title.
+struct PromptPaneView<'a> {
+    pane: Pane,
+    title: String,
+    prompts: &'a [crate::PromptFile],
+    selected: usize,
+    default: Option<&'a str>,
+}
+
+fn draw_prompt_pane(
+    f: &mut Frame,
+    state: &State,
+    area: ratatui::layout::Rect,
+    view: PromptPaneView<'_>,
+) {
+    let items: Vec<ListItem> = view
         .prompts
         .iter()
         .enumerate()
         .map(|(i, p)| {
-            let default_mark = state
-                .config
-                .default_prompt
-                .as_ref()
-                .map(|d| d == &p.name)
-                .unwrap_or(false);
+            let default_mark = view.default.map(|d| d == p.name).unwrap_or(false);
             ListItem::new(format!(
                 "{}{}{}",
-                if i == state.setup.prompt_idx {
-                    "▶ "
-                } else {
-                    "  "
-                },
+                if i == view.selected { "▶ " } else { "  " },
                 p.name,
                 if default_mark { "  ★default" } else { "" }
             ))
         })
         .collect();
     let list = List::new(items).block(bordered_block(
-        " System prompts (d=set default) ",
-        focused_style(state.setup.focus, Pane::Prompts),
+        view.title,
+        focused_style(state.setup.focus, view.pane),
     ));
     let mut st = ListState::default().with_selected(Some(
-        state
-            .setup
-            .prompt_idx
-            .min(state.prompts.len().saturating_sub(1)),
+        view.selected.min(view.prompts.len().saturating_sub(1)),
     ));
     f.render_stateful_widget(list, area, &mut st);
 }
 
+fn draw_prompts(f: &mut Frame, state: &State, area: ratatui::layout::Rect) {
+    draw_prompt_pane(
+        f,
+        state,
+        area,
+        PromptPaneView {
+            pane: Pane::Prompts,
+            title: " System prompts (d=set default) ".to_string(),
+            prompts: &state.prompts,
+            selected: state.setup.prompt_idx,
+            default: state.config.default_prompt.as_deref(),
+        },
+    );
+}
+
 fn draw_task_prompts(f: &mut Frame, state: &State, area: ratatui::layout::Rect) {
-    let items: Vec<ListItem> = state
-        .task_prompts
-        .iter()
-        .enumerate()
-        .map(|(i, p)| {
-            let default_mark = state
-                .config
-                .default_task_prompt
-                .as_ref()
-                .map(|d| d == &p.name)
-                .unwrap_or(false);
-            ListItem::new(format!(
-                "{}{}{}",
-                if i == state.setup.task_prompt_idx {
-                    "▶ "
-                } else {
-                    "  "
-                },
-                p.name,
-                if default_mark { "  ★default" } else { "" }
-            ))
-        })
-        .collect();
     let bulk_n = state.setup.bulk.len();
     let title = if bulk_n > 0 {
-        format!(" Task prompts (Ctrl-Enter = RUN · x = bulk {bulk_n}) ")
+        format!(" Task prompts (Enter = RUN · x = bulk {bulk_n}) ")
     } else {
-        " Task prompts (Ctrl-Enter = RUN · d=set default) ".to_string()
+        " Task prompts (Enter = RUN · d=set default) ".to_string()
     };
-    let list = List::new(items).block(bordered_block(
-        title,
-        focused_style(state.setup.focus, Pane::Task),
-    ));
-    let mut st = ListState::default().with_selected(Some(
-        state
-            .setup
-            .task_prompt_idx
-            .min(state.task_prompts.len().saturating_sub(1)),
-    ));
-    f.render_stateful_widget(list, area, &mut st);
+    draw_prompt_pane(
+        f,
+        state,
+        area,
+        PromptPaneView {
+            pane: Pane::Task,
+            title,
+            prompts: &state.task_prompts,
+            selected: state.setup.task_prompt_idx,
+            default: state.config.default_task_prompt.as_deref(),
+        },
+    );
 }

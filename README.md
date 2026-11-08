@@ -8,7 +8,7 @@ behavior and failures stay auditable after the fact.
 
 ## Features
 
-- **194 providers** from the models.dev catalog (the same set opencode ships),
+- **235 providers** from the models.dev catalog (the same set opencode ships),
   with native adapters for OpenAI, Anthropic, Google Gemini, Azure OpenAI,
   Amazon Bedrock (SigV4), Vertex AI, Cohere, GitLab Duo, GitHub Copilot
   (device flow) and watsonx/SAP AI Core pre-auth flows.
@@ -16,8 +16,8 @@ behavior and failures stay auditable after the fact.
   reasoning-level map and a run-history browser — with command palette and
   mouse support.
 - **Sandboxed execution**: filesystem jail, allowlisted commands, resource
-  limits and timeouts; OS-level isolation via bubblewrap with a seccomp
-  legacy fallback.
+  limits and timeouts; commands run under bubblewrap namespaces when
+  available, and are refused in legacy mode unless explicitly opted in.
 - **Streaming** (SSE) with automatic retries, `Retry-After` support and
   graceful reasoning-level degradation.
 - **Honest accounting**: unknown prices and ratios stay `null` with a warning
@@ -51,7 +51,7 @@ The interactive TUI starts — no CLI flags. The tabs are:
    level is used — that choice **survives navigating between models and
    providers**, so what you set is what bulk runs get. The confirmation
    modal shows the reasoning each run will actually use.
-4. **Reasoning** — every model across all 194 providers with its supported
+4. **Reasoning** — every model across all 235 providers with its supported
    reasoning levels (type to filter, `D` cycles the ★ default on the
    selected model, `F5` reloads the snapshot).
 5. **History** — previous runs; `Enter` opens their `statistics.json`
@@ -79,14 +79,30 @@ defaults, the last task prompt and the concurrency cap persist in
 
 Providers need a credential: store it in the TUI (`Enter` on a provider →
 type the key) or set the env var the provider expects (`OPENAI_API_KEY`,
-`ANTHROPIC_API_KEY`, …). Keys live in `~/.config/lmhub/auth.json` (0600,
-atomic writes), and credentials resolve **auth.json → environment → none**
-per request. Local runtimes (ollama, lmstudio, llama.cpp, …) need none.
+`ANTHROPIC_API_KEY`, …). Keys live in `~/.config/lmhub/auth.json` (created
+mode `0600`, atomic writes), and credentials resolve **per request** in the
+order **auth.json → environment → none**, so a key entered in the TUI works
+immediately without a restart. `[key ok]` badges use the same rule. The
+catalog's `key_envs` list (not its full `env` list) decides which env vars
+count as credentials — e.g. `AZURE_RESOURCE_NAME` is never sent as a key.
+`LMHUB_GITHUB_CLIENT_ID` overrides the Copilot OAuth client id and
+`LMHUB_COPILOT_EDITOR_VERSION` the editor-version header.
+
+Local runtimes need no key: `ollama` (`http://localhost:11434/v1`),
+`llamacpp` (`http://localhost:8080/v1`), `vllm` (`http://localhost:8000/v1`),
+`localai` (`http://localhost:8080/v1`), `lmstudio`, `qvac` — all
+OpenAI-compatible and resolved even when models.dev does not list them.
 
 Custom providers live in [`providers/`](providers/) as TOML files — see
 [`providers/example.toml.example`](providers/example.toml.example). Adding one
 requires **no changes to the runner core**, and a custom entry overrides a
-bundled provider with the same `id`.
+bundled provider with the same `id`. Plain-`http` base URLs are refused for
+non-local hosts unless `allow_insecure = true` is set explicitly.
+
+Models.dev behavior: the catalog is fetched at startup, cached with a TTL and
+served stale (with a warning) when the network fails. A cache blob that no
+longer parses is reported as an error instead of silently yielding an empty
+provider list.
 
 Prompts are markdown files split into two lists, both discovered across
 `prompts/` (+ `~/.config/lmhub/prompts`, + cache) and deduped by name:
@@ -118,15 +134,19 @@ output/
 The family is decided by: explicit override → models.dev metadata → an
 id-prefix heuristic.
 
-- **`statistics.json`** (camelCase): `status` (completed/error/timeout/
-  cancelled/limit_exceeded — written for **every** terminal state, including
-  panics), `runId` (traceable to the directory suffix), provider/model/
-  family/reasoning, `tokens` (input, output, reasoning, cacheRead/cacheWrite,
-  total, cacheHitRatio), `performance` (tokensPerSecond, turns, llmRequests,
-  avg/max request ms), `toolCalls` (total/successful/failed + ratios),
-  `cache`, `pricing` (source, fetchedAt, snapshotVersion, prices and computed
-  USD — all `null` when unknown), `errors.count` + `errors.logPath`,
-  `warningsCount`.
+- **`statistics.json`** (camelCase, `schemaVersion: 2`): `status` (completed/
+  error/timeout/cancelled/limit_exceeded — written for **every** terminal
+  state, including panics), `runId` (traceable to the directory suffix),
+  provider/model/family/reasoning, `tokens` (input, output, reasoning,
+  cacheRead/cacheWrite, total, cacheHitRatio), `performance`
+  (tokensPerSecond, llmRequests, avg/max request ms), `toolCalls`
+  (total/successful/failed + ratios), `cache` (`enabled` = caching was
+  requested; `providerCacheSupported`; `providerCacheUsed`), `pricing`
+  (source, fetchedAt, snapshotVersion, prices and computed USD — all `null`
+  when unknown), `errors.count` + `errors.logPath`, `warningsCount`.
+  **v2 migration**: `schemaVersion` was added and the duplicate
+  `performance.turns` (= `llmRequests`) was dropped; a missing version means
+  v1 and readers ignore unknown fields.
 - **`events.jsonl`** — one JSON object per line (`run_started`,
   `turn_started`, `llm_response`, `tool_call`, `sandbox_violation`,
   `warning`, `error`, `run_finished`). Streaming deltas are UI-only and never
@@ -178,29 +198,52 @@ The model can only affect its `model-output/` directory:
   resolved manually via `PATH` and passed as argv arrays — no shell.
 - **Process hygiene**: empty environment (`PATH`/`HOME`/`TMPDIR` inside the
   workspace only, `C.UTF-8` locale), per-command timeout, hard resource
-  limits (2 GiB address space, CPU, 64 MiB file size, 512 processes,
-  1024 fds), process-group termination on expiry (SIGTERM → 2 s grace →
-  SIGKILL).
+  limits (2 GiB address space, CPU, 64 MiB file size, 1024 fds), process-group
+  termination on expiry (SIGTERM → 2 s grace → SIGKILL). `RLIMIT_NPROC` is
+  deliberately **not** set: it counts tasks per real UID (globally), so on a
+  machine whose user already runs hundreds of tasks it makes even bwrap's
+  namespace `clone` fail; fork bombs are contained by the process-group kill
+  and the address-space/CPU limits instead.
 - **Violations** land in `errors.log` and `events.jsonl`; the runner never
   logs API keys or environment secrets (values are scrubbed at every sink).
+  A missing/unresolvable binary is *not* a violation: it is reported as
+  `sandbox_unavailable` so `toolCalls.failed` and violation counts stay
+  honest.
 
 ### OS-level isolation
 
-When **bubblewrap** (`bwrap`) is installed — auto-detected at startup — each
-command runs inside user/pid/ipc/uts namespaces with a read-only view of the
-system (`/usr`, `/bin`, `/lib`, `/lib64`, `/etc`) and the model workspace as
-the only writable directory. `/proc` and `/dev` are fresh sandbox instances,
-so the command cannot see host processes or devices. **Network stays
-allowed** so `npm install` works. In **legacy mode** (bwrap missing, or user
-namespaces blocked — e.g. Ubuntu 24.04's `apparmor_restrict_unprivileged_userns`),
-the command runs directly and a **seccomp deny-list** applies instead
-(ptrace, cross-process memory access, mounts, kernel module loading, bpf,
-userfaultfd, io_uring, `unshare`/`setns`, namespace-flag `clone`); legacy
-mode logs a loud warning at startup. Seccomp cannot apply to the bwrap
-wrapper itself (bwrap needs those very syscalls), so under bwrap the
-namespace split carries that protection. Tune with
-`sandbox = "auto" | "bwrap" | "legacy"` in `~/.config/lmhub/config.toml`
-(or `LMHUB_BWRAP` to point at a bwrap binary).
+**File tools are always jailed**: every path goes through `PathJail`, so the
+model can only read/write inside the run workspace (canonicalization + prefix
+check, `..` rejected).
+
+**Commands are only isolated under bubblewrap.** When `bwrap` is installed —
+auto-detected at startup — `run_command` runs inside user/pid/ipc/uts
+namespaces with a read-only view of the system (`/usr`, `/bin`, `/lib`,
+`/lib64`, `/etc`) and the model workspace as the only writable directory.
+`/proc` and `/dev` are fresh namespaces, so the command cannot see host
+processes or devices. **Network stays allowed** so `npm install` works.
+
+When bwrap is missing (or user namespaces are blocked — e.g. Ubuntu 24.04's
+`apparmor_restrict_unprivileged_userns`), the runner enters **legacy mode**:
+
+- `run_command` is **refused by default** (a `sandbox_violation` recorded in
+  `errors.log`/`events.jsonl`) — the model is told to install bubblewrap or
+  ask you to opt in;
+- set `legacy_commands = "allow"` in `~/.config/lmhub/config.toml` to run
+  commands **unsandboxed** anyway: they execute directly as your user, with
+  only rlimits, a per-command timeout, process-group termination and a seccomp
+  deny-list (ptrace, cross-process memory access, mounts, kernel module
+  loading, bpf, userfaultfd, io_uring, `unshare`/`setns`, namespace-flag
+  `clone`). Use this only with providers you trust: the model can read/write
+  anywhere you can.
+
+Legacy mode logs a loud startup warning and the TUI status line always shows
+the mode (`[cmd: bwrap]`, `[cmd: legacy/unsandboxed]`, `[cmd: disabled]`).
+Seccomp cannot apply to the bwrap wrapper itself (bwrap needs those very
+syscalls), so under bwrap the namespace split carries that protection. Tune
+with `sandbox = "auto" | "bwrap" | "legacy"` and `legacy_commands = "deny" |
+"allow"` in `~/.config/lmhub/config.toml` (or `LMHUB_BWRAP` to point at a
+bwrap binary).
 
 Note: this is still application-level sandboxing (no full OS
 virtualisation). Run only with providers you trust accordingly.
@@ -223,9 +266,36 @@ guessed. Cost conventions: billed plain input = `input − cacheRead −
 cacheWrite`; `cacheHitRatio = cacheRead / input`; reasoning tokens are
 reported but never billed twice.
 
+### Context management
+
+Before every request the agent loop checks the estimated request size
+(`chars / 4` tokens) against the model's context window from Models.dev,
+always reserving room for the reply (`max_output_tokens`, capped at half the
+window). When a request would not fit it degrades deterministically:
+
+1. **trim** old tool results to `tool_result_max_bytes` (default 8 KB),
+   oldest first;
+2. **drop** the oldest assistant turn and its tool results;
+3. if the task message itself cannot fit, the run fails fast with status
+   `limit_exceeded` and a clear `errors.log` entry instead of sending a
+   doomed request.
+
+Every trim/drop is recorded as a `warning` event naming what was dropped.
+`max_history_tokens` in `config.toml` adds an optional cap on history
+tokens; unset, the budget is derived from the model window.
+
+### Thinking budgets
+
+When Models.dev declares a thinking-budget range for the model
+(`reasoning_options.budget_tokens`), the runner derives the per-level budget
+from it — `min` for minimal/low, the midpoint for medium and `max` for
+high/xhigh/max — and sends it as the provider's budget field. Models without
+a declared range keep the adapters' per-level constants. `off` never enables
+thinking (Gemini sends an explicit `thinkingBudget: 0`).
+
 ## Providers (the full opencode catalog)
 
-The runner ships a bundled snapshot of **models.dev** — all 194 providers
+The runner ships a bundled snapshot of **models.dev** — all 235 providers
 opencode supports are available out of the box, routed through dedicated
 adapters per protocol:
 
@@ -296,6 +366,12 @@ max_output_tokens = 16384
 read_file_max_bytes = 48000
 write_file_max_bytes = 1000000
 sandbox = "auto"              # auto | bwrap | legacy (command isolation backend)
+legacy_commands = "deny"      # deny | allow — run_command without bubblewrap (see Sandbox)
+# max_history_tokens = 60000  # optional cap; unset derives it from the model window
+tool_result_max_bytes = 8192  # trim oversized tool results when over the context budget
+stream_idle_timeout_secs = 120 # stalled SSE stream detection (not a total deadline)
+walk_max_depth = 12           # find_files/search_files walk depth below the root
+walk_max_entries = 10000      # entry cap; hitting it is reported in the tool summary
 max_retries = 6
 retry_base_ms = 500
 retry_cap_ms = 30000
@@ -330,10 +406,12 @@ GitHub Actions on every push/PR: `cargo fmt --check`, `clippy -D warnings`,
 the full test suite (`--locked`), a release build smoke, `cargo audit`
 (advisories), `cargo deny` (licenses/bans/sources) — plus a monthly
 models.dev snapshot-drift check that fails if `xtask gen-providers` would
-change the bundled catalog. Tagging `v*` builds release binaries for linux
-(x86_64, aarch64-musl via cross) and macOS (x86_64, aarch64); tarballs ship
-the binary plus `prompts/*.md`, `prompts/system-prompts/`,
-`prompts/task-prompts/` and `providers/example.toml.example`.
+change the bundled catalog, and a weekly `cargo outdated --root-deps-only`
+direct-dependency drift report (scheduled runs only; stale deps never block
+PRs). Tagging `v*` builds release binaries for linux (x86_64, aarch64-musl
+via cross) and macOS (x86_64, aarch64); tarballs ship the binary plus
+`prompts/*.md`, `prompts/system-prompts/`, `prompts/task-prompts/` and
+`providers/example.toml.example`.
 
 ## Architecture
 
@@ -341,7 +419,7 @@ the binary plus `prompts/*.md`, `prompts/system-prompts/`,
 crates/core        domain types, Provider trait, statistics/event schemas,
                    auth store, redaction engine, config
 crates/modelsdev   models.dev client + local cache + pricing lookup
-crates/providers   native + routed adapters (194-provider catalog), model
+crates/providers   native + routed adapters (235-provider catalog), model
                    resolution chain, SigV4/JWT/device-flow helpers
 crates/sandbox     path jail, allowlisted process runner, the 15 tools,
                    bwrap/seccomp runtime detection

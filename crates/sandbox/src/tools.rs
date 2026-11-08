@@ -5,7 +5,7 @@ use crate::jail::PathJail;
 use crate::proc as sandbox_proc;
 use lmhub_core::{CoreError, Result, ToolSpec};
 use serde_json::{json, Value};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -223,6 +223,15 @@ pub struct SandboxConfig {
     pub write_file_max_bytes: u64,
     /// OS-level isolation backend for `run_command`.
     pub runtime: crate::runtime::SandboxRuntime,
+    /// Whether `run_command` may run under [`SandboxRuntime::Legacy`]. `false`
+    /// (the default in config terms) refuses commands outright instead of
+    /// silently running them unsandboxed.
+    pub allow_legacy_commands: bool,
+    /// `find_files`/`search_files` walk depth (levels below the root).
+    pub walk_max_depth: usize,
+    /// `find_files`/`search_files` walk entry cap; hitting it is reported in
+    /// the tool summary.
+    pub walk_max_entries: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -743,7 +752,7 @@ impl ToolRuntime {
             Ok(p) => p,
             Err(e) => return violation_outcome(e),
         };
-        let size = match std::fs::metadata(&src_path) {
+        let size = match tokio::fs::metadata(&src_path).await {
             Ok(m) => m.len(),
             Err(e) => {
                 return ToolOutcome::fail(
@@ -793,7 +802,7 @@ impl ToolRuntime {
             Ok(p) => p,
             Err(e) => return violation_outcome(e),
         };
-        let meta = match std::fs::metadata(&path) {
+        let meta = match tokio::fs::metadata(&path).await {
             Ok(m) => m,
             Err(e) => {
                 return ToolOutcome::fail(
@@ -863,11 +872,15 @@ impl ToolRuntime {
                 );
             }
         }
-        let existing = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let existing = tokio::fs::metadata(&path)
+            .await
+            .map(|m| m.len())
+            .unwrap_or(0);
         let ends_nl = if existing == 0 {
             true
         } else {
-            let mut f = match std::fs::File::open(&path) {
+            use tokio::io::AsyncSeekExt;
+            let mut f = match tokio::fs::File::open(&path).await {
                 Ok(f) => f,
                 Err(e) => {
                     return ToolOutcome::fail(
@@ -878,7 +891,12 @@ impl ToolRuntime {
                 }
             };
             let mut byte = [0u8; 1];
-            f.seek(SeekFrom::End(-1)).is_ok() && f.read_exact(&mut byte).is_ok() && byte[0] == b'\n'
+            let seeked = f.seek(std::io::SeekFrom::End(-1)).await.is_ok();
+            seeked
+                && tokio::io::AsyncReadExt::read_exact(&mut f, &mut byte)
+                    .await
+                    .is_ok()
+                && byte[0] == b'\n'
         };
         let needs_newline = ensure_newline && !ends_nl;
         let added = content.len() as u64 + if needs_newline { 1 } else { 0 };
@@ -892,10 +910,11 @@ impl ToolRuntime {
                 false,
             );
         }
-        let mut f = match std::fs::OpenOptions::new()
+        let mut f = match tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)
+            .await
         {
             Ok(f) => f,
             Err(e) => {
@@ -906,16 +925,24 @@ impl ToolRuntime {
                 )
             }
         };
-        if needs_newline && f.write_all(b"\n").is_err() {
+        use tokio::io::AsyncWriteExt;
+        if needs_newline && f.write_all(b"\n").await.is_err() {
             return ToolOutcome::fail(
                 format!("cannot append to {raw:?}: write failed"),
                 json!({"path": raw}),
                 false,
             );
         }
-        if let Err(e) = f.write_all(content.as_bytes()) {
+        if let Err(e) = f.write_all(content.as_bytes()).await {
             return ToolOutcome::fail(
                 format!("cannot append to {raw:?}: {e}"),
+                json!({"path": raw}),
+                false,
+            );
+        }
+        if let Err(e) = f.flush().await {
+            return ToolOutcome::fail(
+                format!("cannot append to {raw:?}: flush failed: {e}"),
                 json!({"path": raw}),
                 false,
             );
@@ -1018,12 +1045,18 @@ impl ToolRuntime {
             .unwrap_or(Path::new(""))
             .to_path_buf();
         let mut found: Vec<String> = Vec::new();
-        for rel in walk_relative(&root, 12, 10_000) {
+        let mut glob = Glob::new(&pattern);
+        let (entries, truncated) = walk_relative_capped(
+            &root,
+            self.config.walk_max_depth,
+            self.config.walk_max_entries,
+        );
+        for rel in entries {
             if found.len() >= max_results {
                 break;
             }
             let rel_str = rel.to_string_lossy().to_string();
-            if glob_match(&pattern, &rel_str) {
+            if glob.matches(&rel_str) {
                 found.push(display_rel(&root_rel, &rel));
             }
         }
@@ -1035,7 +1068,16 @@ impl ToolRuntime {
         if found.len() >= max_results {
             summary.push_str(&format!("\n[...showing first {max_results} matches...]"));
         }
-        ToolOutcome::ok(summary, json!({"pattern": pattern, "matches": found.len()}))
+        if truncated {
+            summary.push_str(&format!(
+                "\n[walk capped at {} entries — raise walk_max_entries or narrow the path]",
+                self.config.walk_max_entries
+            ));
+        }
+        ToolOutcome::ok(
+            summary,
+            json!({"pattern": pattern, "matches": found.len(), "walk_truncated": truncated}),
+        )
     }
 
     async fn search_files(&self, args: &Value) -> ToolOutcome {
@@ -1085,7 +1127,12 @@ impl ToolRuntime {
         let mut matches: Vec<String> = Vec::new();
         let mut scanned = 0usize;
         let mut cut_files = 0usize;
-        for rel in walk_relative(&root, 12, 10_000) {
+        let (entries, walk_truncated) = walk_relative_capped(
+            &root,
+            self.config.walk_max_depth,
+            self.config.walk_max_entries,
+        );
+        for rel in entries {
             if matches.len() >= max_results {
                 break;
             }
@@ -1139,9 +1186,16 @@ impl ToolRuntime {
                 "\n[{cut_files} file(s) larger than 64 KB scanned partially]"
             ));
         }
+        if walk_truncated {
+            summary.push_str(&format!(
+                "\n[walk capped at {} entries — raise walk_max_entries or narrow the path]",
+                self.config.walk_max_entries
+            ));
+        }
         ToolOutcome::ok(
             summary,
-            json!({"pattern": pattern, "matches": matches.len(), "files_scanned": scanned}),
+            json!({"pattern": pattern, "matches": matches.len(), "files_scanned": scanned,
+                   "walk_truncated": walk_truncated}),
         )
     }
 
@@ -1199,6 +1253,18 @@ impl ToolRuntime {
     }
 
     async fn run_command(&self, args: &Value) -> ToolOutcome {
+        // Policy first: under the legacy backend (no bwrap) commands are
+        // refused unless the user explicitly opted in, no matter the argv.
+        if !self.config.runtime.is_bwrap() && !self.config.allow_legacy_commands {
+            return ToolOutcome::fail(
+                "run_command is disabled: bubblewrap is unavailable (no filesystem isolation). \
+                 Install bubblewrap, or set `legacy_commands = \"allow\"` in config.toml to run \
+                 commands unsandboxed — the model can then read/write anywhere you can. \
+                 File tools remain jailed to the workspace.",
+                json!({"blocked": true, "reason": "legacy_commands_denied"}),
+                true,
+            );
+        }
         let Some(argv): Option<Vec<String>> =
             args.get("argv").and_then(|v| v.as_array()).map(|a| {
                 a.iter()
@@ -1380,7 +1446,8 @@ fn read_head(path: &Path, cap: u64) -> std::io::Result<String> {
 /// Bounded recursive walk of `root`, returning workspace-relative paths in
 /// sorted pre-order (deterministic). Skips the hidden `.home`/`.tmp` dirs
 /// and stops at `max_entries` entries or `max_depth` levels below root.
-fn walk_relative(root: &Path, max_depth: usize, max_entries: usize) -> Vec<PathBuf> {
+/// Second return value: the walk hit `max_entries` (results are incomplete).
+fn walk_relative_capped(root: &Path, max_depth: usize, max_entries: usize) -> (Vec<PathBuf>, bool) {
     let mut out: Vec<PathBuf> = Vec::new();
     let mut stack: Vec<(PathBuf, usize)> = vec![(PathBuf::new(), 0)];
     while let Some((rel, depth)) = stack.pop() {
@@ -1400,7 +1467,7 @@ fn walk_relative(root: &Path, max_depth: usize, max_entries: usize) -> Vec<PathB
         names.sort_by(|a, b| a.0.cmp(&b.0));
         for (name, is_dir) in names.iter().rev() {
             if out.len() >= max_entries {
-                return out;
+                return (out, true);
             }
             let child_rel = rel.join(name);
             out.push(child_rel.clone());
@@ -1409,7 +1476,12 @@ fn walk_relative(root: &Path, max_depth: usize, max_entries: usize) -> Vec<PathB
             }
         }
     }
-    out
+    (out, false)
+}
+
+/// [`walk_relative_capped`] discarding the truncation flag.
+fn walk_relative(root: &Path, max_depth: usize, max_entries: usize) -> Vec<PathBuf> {
+    walk_relative_capped(root, max_depth, max_entries).0
 }
 
 /// Globs match against the searched root; displayed paths are workspace-
@@ -1425,33 +1497,78 @@ fn display_rel(root_rel: &Path, rel: &Path) -> String {
 
 /// Glob match against a relative path: `*` matches any run of characters
 /// (including `/`, so `**/x` works naturally), `?` matches exactly one.
-/// Case-sensitive; iterative DP so hostile patterns stay linear.
+/// Case-sensitive; iterative DP so hostile patterns stay linear. Reference
+/// implementation for the precompiled [`Glob`] (tests only).
+#[cfg(test)]
 fn glob_match(pattern: &str, path: &str) -> bool {
     let p: Vec<char> = pattern.chars().collect();
     let s: Vec<char> = path.chars().collect();
-    let (n, m) = (p.len(), s.len());
-    let mut dp = vec![vec![false; m + 1]; n + 1];
-    dp[0][0] = true;
-    for i in 1..=n {
-        dp[i][0] = dp[i - 1][0] && p[i - 1] == '*';
-    }
-    for i in 1..=n {
-        for j in 1..=m {
-            dp[i][j] = match p[i - 1] {
-                '*' => dp[i - 1][j] || dp[i][j - 1],
-                '?' => dp[i - 1][j - 1],
-                c => dp[i - 1][j - 1] && c == s[j - 1],
-            };
+    let mut scratch = Vec::new();
+    glob_match_chars(&p, &s, &mut scratch)
+}
+
+/// Glob matcher with the pattern pre-parsed and a reusable row buffer.
+///
+/// `find_files` matches thousands of paths against one pattern; rebuilding the
+/// pattern chars and the O(n·m) DP matrix per file dominated the walk.
+struct Glob {
+    pattern: Vec<char>,
+    scratch: Vec<bool>,
+}
+
+impl Glob {
+    fn new(pattern: &str) -> Self {
+        Self {
+            pattern: pattern.chars().collect(),
+            scratch: Vec::new(),
         }
     }
-    dp[n][m]
+
+    fn matches(&mut self, path: &str) -> bool {
+        let s: Vec<char> = path.chars().collect();
+        glob_match_chars(&self.pattern, &s, &mut self.scratch)
+    }
+}
+
+/// Two-row DP (O(pattern·path) time, O(path) space).
+fn glob_match_chars(p: &[char], s: &[char], scratch: &mut Vec<bool>) -> bool {
+    let m = s.len();
+    scratch.clear();
+    scratch.resize(m + 1, false);
+    scratch[0] = true;
+    for pc in p.iter() {
+        let mut diag = scratch[0];
+        scratch[0] = scratch[0] && *pc == '*';
+        for j in 1..=m {
+            let prev = scratch[j];
+            scratch[j] = match pc {
+                '*' => scratch[j] || scratch[j - 1],
+                '?' => diag,
+                c => diag && *c == s[j - 1],
+            };
+            diag = prev;
+        }
+    }
+    scratch[m]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The prompt's tool table and the sandbox specs must not drift.
+    #[test]
+    fn tool_specs_match_core_tool_names() {
+        let names: Vec<String> = tool_specs().into_iter().map(|t| t.name).collect();
+        assert_eq!(names, lmhub_core::TOOL_NAMES.to_vec());
+    }
+
     fn runtime() -> (tempfile::TempDir, ToolRuntime) {
+        runtime_with(true)
+    }
+
+    /// Same as [`runtime`] but with an explicit legacy-command policy.
+    fn runtime_with(allow_legacy_commands: bool) -> (tempfile::TempDir, ToolRuntime) {
         let dir = tempfile::tempdir().unwrap();
         let rt = ToolRuntime::create(
             &dir.path().join("ws"),
@@ -1461,10 +1578,90 @@ mod tests {
                 read_file_max_bytes: 1024,
                 write_file_max_bytes: 1_048_576,
                 runtime: crate::runtime::SandboxRuntime::Legacy,
+                allow_legacy_commands,
+                walk_max_depth: 12,
+                walk_max_entries: 10_000,
             },
         )
         .unwrap();
         (dir, rt)
+    }
+
+    #[tokio::test]
+    async fn legacy_deny_blocks_run_command_as_a_violation() {
+        let (_dir, rt) = runtime_with(false);
+        let out = rt
+            .execute("run_command", &json!({"argv": ["node", "--version"]}))
+            .await;
+        assert!(!out.success);
+        assert!(
+            out.sandbox_violation,
+            "policy refusal must be a sandbox violation: {}",
+            out.summary
+        );
+        assert!(
+            out.summary.contains("legacy_commands = \"allow\"")
+                && out.summary.contains("bubblewrap"),
+            "message must tell the user how to proceed: {}",
+            out.summary
+        );
+        assert_eq!(out.metadata["blocked"], json!(true));
+        assert_eq!(out.metadata["reason"], json!("legacy_commands_denied"));
+    }
+
+    #[tokio::test]
+    async fn legacy_allow_still_runs_allowlisted_commands() {
+        let (_dir, rt) = runtime_with(true);
+        let out = rt
+            .execute("run_command", &json!({"argv": ["node", "--version"]}))
+            .await;
+        assert!(out.success, "{}", out.summary);
+        assert!(!out.sandbox_violation);
+    }
+
+    #[tokio::test]
+    async fn legacy_deny_leaves_file_tools_working() {
+        let (_dir, rt) = runtime_with(false);
+        let out = rt
+            .execute("write_file", &json!({"path": "a.txt", "content": "hi"}))
+            .await;
+        assert!(out.success, "{}", out.summary);
+        let out = rt.execute("read_file", &json!({"path": "a.txt"})).await;
+        assert!(out.success, "{}", out.summary);
+        assert!(out.summary.contains("hi"), "{}", out.summary);
+    }
+
+    #[tokio::test]
+    async fn missing_binary_is_not_counted_as_a_sandbox_violation() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = "definitely-not-installed-lmhub-xyz";
+        let rt = ToolRuntime::create(
+            &dir.path().join("ws"),
+            SandboxConfig {
+                allowed_commands: vec![missing.into()],
+                command_timeout: Duration::from_secs(5),
+                read_file_max_bytes: 1024,
+                write_file_max_bytes: 1024,
+                runtime: crate::runtime::SandboxRuntime::Legacy,
+                allow_legacy_commands: true,
+                walk_max_depth: 12,
+                walk_max_entries: 10_000,
+            },
+        )
+        .unwrap();
+        let out = rt.execute("run_command", &json!({"argv": [missing]})).await;
+        assert!(!out.success);
+        assert!(
+            !out.sandbox_violation,
+            "a missing binary must not inflate violation counts: {}",
+            out.summary
+        );
+        assert_eq!(out.metadata.get("blocked"), None);
+        assert!(
+            out.summary.contains("run_command failed"),
+            "{}",
+            out.summary
+        );
     }
 
     #[tokio::test]
@@ -1675,6 +1872,58 @@ mod tests {
         let out = rt.execute("get_file_info", &json!({"path": "."})).await;
         assert!(out.success, "{}", out.summary);
         assert!(out.summary.contains("type: directory"), "{}", out.summary);
+    }
+
+    #[tokio::test]
+    async fn find_files_reports_walk_truncation() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = ToolRuntime::create(
+            &dir.path().join("ws"),
+            SandboxConfig {
+                allowed_commands: vec![],
+                command_timeout: Duration::from_secs(5),
+                read_file_max_bytes: 1024,
+                write_file_max_bytes: 1024,
+                runtime: crate::runtime::SandboxRuntime::Legacy,
+                allow_legacy_commands: false,
+                walk_max_depth: 1,
+                walk_max_entries: 2,
+            },
+        )
+        .unwrap();
+        for i in 0..5 {
+            std::fs::write(rt.root().join(format!("f{i}.txt")), "x").unwrap();
+        }
+        let out = rt
+            .execute(
+                "find_files",
+                &json!({"pattern": "*.txt", "max_results": 100}),
+            )
+            .await;
+        assert!(out.success, "{}", out.summary);
+        assert!(out.summary.contains("walk capped"), "{}", out.summary);
+        assert_eq!(out.metadata["walk_truncated"], json!(true));
+    }
+
+    #[test]
+    fn precompiled_glob_matches_the_reference() {
+        for pattern in ["**/*.test.ts", "*.md", "a?c", "*", "src/**", "x[ab]"] {
+            let mut matched = Glob::new(pattern);
+            for path in [
+                "src/tests/app.test.ts",
+                "README.md",
+                "abc",
+                "a/c",
+                "src/d/e",
+                "x[ab]",
+            ] {
+                assert_eq!(
+                    matched.matches(path),
+                    glob_match(pattern, path),
+                    "pattern {pattern:?} vs path {path:?}"
+                );
+            }
+        }
     }
 
     #[tokio::test]

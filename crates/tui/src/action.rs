@@ -3,6 +3,27 @@
 use crate::state::Pane;
 use crate::UiMsg;
 
+/// Text filters edited with an on-screen cursor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilterTarget {
+    /// Setup screen provider search.
+    Providers,
+    /// Reasoning map model filter.
+    ReasoningMap,
+}
+
+/// One cursor-aware edit of a filter field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilterEdit {
+    Insert(char),
+    Backspace,
+    Delete,
+    Left,
+    Right,
+    Home,
+    End,
+}
+
 /// Everything the UI can do. `State::reduce` folds these; the returned
 /// [`Effect`]s are executed by the event loop.
 #[derive(Clone)]
@@ -16,16 +37,14 @@ pub enum Action {
     /// `?` — open the keybinding help overlay.
     OpenHelp,
     CloseModal,
-    /// A transient status message from a background task.
-    Notice(String),
 
     // ---- setup -----------------------------------------------------------
     CycleFocus(bool),
     /// Mouse click inside a setup pane.
     FocusPane(Pane),
     MoveSelection(i32),
-    /// Live provider search text (auto-filter on typing).
-    SearchProviders(String),
+    /// Cursor-aware edit of an inline filter field (provider search / map).
+    FilterEdit(FilterTarget, FilterEdit),
     ClearSearch,
     ToggleFavorite,
     /// `Enter` on the focused provider: connect flow or key modal.
@@ -77,7 +96,6 @@ pub enum Action {
     OpenHistoryDetail,
 
     // ---- reasoning map ----------------------------------------------------
-    MapFilter(String),
     MapClear,
     MapMove(i32),
     /// `d` on the map: cycle the default reasoning for the selected model.
@@ -138,13 +156,23 @@ impl Screen {
         }
     }
     pub fn cycle(&self, forward: bool) -> Self {
-        let idx = Self::ALL.iter().position(|s| s == self).unwrap_or(0);
-        let next = if forward {
-            (idx + 1) % Self::ALL.len()
-        } else {
-            (idx + Self::ALL.len() - 1) % Self::ALL.len()
-        };
-        Self::ALL[next]
+        Self::ALL[crate::action::rotate(
+            Self::ALL.len(),
+            Self::ALL.iter().position(|s| s == self).unwrap_or(0),
+            forward,
+        )]
+    }
+}
+
+/// Wrap-around index step shared by the `Pane`/`Screen` cycles.
+pub(crate) fn rotate(len: usize, current: usize, forward: bool) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    if forward {
+        (current + 1) % len
+    } else {
+        (current + len - 1) % len
     }
 }
 
@@ -174,9 +202,28 @@ pub enum Effect {
     LoadSnapshot,
     /// Persist UI prefs (favorites, last selections).
     SavePrefs,
+    /// Persist config.toml (default prompt / task prompt changed).
+    SaveConfig,
+    /// Persist one API key entered in the TUI. Blocking auth.json write is
+    /// offloaded; the outcome arrives as `UiMsg::Notice`.
+    SaveKey { provider_id: String, key: String },
     /// Run the GitHub Copilot device-flow (long-running; results arrive as
     /// `UiMsg::Notice`).
     RunCopilotFlow,
     /// Open a directory in the platform file manager (blocking spawn).
     OpenOutputDir(std::path::PathBuf),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rotate_wraps_both_ways() {
+        assert_eq!(rotate(4, 0, true), 1);
+        assert_eq!(rotate(4, 3, true), 0);
+        assert_eq!(rotate(4, 0, false), 3);
+        assert_eq!(rotate(0, 0, true), 0);
+        assert_eq!(rotate(0, 7, false), 0);
+    }
 }

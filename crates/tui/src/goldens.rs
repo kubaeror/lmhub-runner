@@ -4,6 +4,9 @@
 //!
 //! Regenerate after intentional layout/copy changes with:
 //! `LMHUB_UPDATE_GOLDENS=1 cargo test -p lmhub-tui goldens`
+//!
+//! Setup-screen goldens render the bundled provider catalog, so the monthly
+//! `gen-providers` refresh also requires a regeneration.
 
 use crate::state::{CachedCatalog, Modal, RunSession, RunSessionStatus, State};
 use crate::transcript::{ToolCallEvent, Transcript, Turn};
@@ -93,6 +96,8 @@ fn model(id: &str, name: &str, reasoning: bool) -> ModelInfo {
             tool_call: true,
             reasoning,
             prompt_caching: true,
+            reasoning_budget_min: None,
+            reasoning_budget_max: None,
             reasoning_levels: if reasoning {
                 Some(vec![
                     ReasoningLevel::Off,
@@ -136,10 +141,7 @@ fn seed_openai(state: &mut State) {
         })
         .unwrap();
     state.adopt_catalog(&cache);
-    state
-        .prefs
-        .model_defaults
-        .insert("gpt-4o".into(), ReasoningLevel::High);
+    state.set_model_default_reasoning("openai", "gpt-4o", ReasoningLevel::High);
 }
 
 fn seed_prompts(state: &mut State) {
@@ -175,6 +177,7 @@ fn session(id: u64, model_id: &str, status: RunSessionStatus, state: &State) -> 
         task: "refactor the codebase".into(),
         status,
         started: Instant::now(),
+        finished_at: None,
         cancel: None,
         transcript: Transcript::default(),
         tokens: Default::default(),
@@ -384,6 +387,9 @@ fn goldens_setup_search() {
     seed_prompts(&mut state);
     state.setup.provider_filter = "grok".into();
     state.setup.provider_idx = 0;
+    // The displayed model list belongs to openai (seed_openai); keep the
+    // selected provider id consistent so the ★ hint renders.
+    state.setup.selected_provider_id = Some("openai".into());
     check_golden("setup_search", &state);
 }
 
@@ -451,10 +457,7 @@ fn goldens_reasoning_map() {
     let (mut state, _dir) = crate::testutil::test_state();
     state.screen = crate::action::Screen::Reasoning;
     state.snapshot_all = Some(Arc::new(snapshot()));
-    state
-        .prefs
-        .model_defaults
-        .insert("claude-3-7-sonnet".into(), ReasoningLevel::High);
+    state.set_model_default_reasoning("anthropic", "claude-3-7-sonnet", ReasoningLevel::High);
     state.map.filter = "sonnet".into();
     check_golden("reasoning_map", &state);
 }

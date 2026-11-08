@@ -51,8 +51,8 @@ pub fn build_registry(
     auth_store: Arc<Mutex<AuthStore>>,
 ) -> (ProviderRegistry, Vec<String>) {
     let mut items: Vec<Arc<dyn Provider>> = vec![
-        crate::anthropic::NativeAnthropicProvider::standard(),
-        crate::openai::NativeOpenAiProvider::standard(),
+        crate::anthropic::NativeAnthropicProvider::standard(Arc::clone(&auth_store)),
+        crate::openai::NativeOpenAiProvider::standard(Arc::clone(&auth_store)),
     ];
     let mut errors: Vec<String> = Vec::new();
 
@@ -91,7 +91,7 @@ pub fn build_registry(
             resolved.entry.name.clone(),
             resolved.protocol,
             resolved.base_url.clone(),
-            resolved.entry.env.clone(),
+            resolved.key_envs.clone(),
             resolved.entry.id.clone(),
             resolved.requires_key,
             Arc::clone(&auth_store),
@@ -100,7 +100,8 @@ pub fn build_registry(
         items.push(provider);
     }
 
-    let (mut custom, custom_errors) = crate::config::load_providers_from_dir(providers_dir);
+    let (mut custom, custom_errors) =
+        crate::config::load_providers_from_dir(providers_dir, auth_store);
     errors.extend(custom_errors);
 
     // Custom TOMLs win over known entries with the same id.
@@ -125,6 +126,8 @@ fn local_to_info(lm: &LocalModel) -> ModelInfo {
             reasoning: lm.reasoning,
             prompt_caching: false, // unknown until Models.dev says otherwise
             reasoning_levels: lm.parsed_reasoning_levels(),
+            reasoning_budget_min: None,
+            reasoning_budget_max: None,
         },
     }
 }
@@ -151,6 +154,8 @@ pub fn entry_to_info(entry: &ModelEntry) -> ModelInfo {
                 .map(|c| c.cache_read.is_some())
                 .unwrap_or(false),
             reasoning_levels: entry.reasoning_levels(),
+            reasoning_budget_min: entry.reasoning_budget_range().map(|(min, _)| min),
+            reasoning_budget_max: entry.reasoning_budget_range().map(|(_, max)| max),
         },
     }
 }

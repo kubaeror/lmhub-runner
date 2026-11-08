@@ -18,6 +18,14 @@ impl State {
     /// error here, which forces a conscious decision about which screen owns
     /// it.
     pub fn reduce(&mut self, action: Action) -> Vec<Effect> {
+        let mut effects = self.reduce_inner(action);
+        // `SavePrefs` writes the same file; one per reduce batch is enough
+        // (bulk launches used to emit one per session).
+        dedup_save_prefs(&mut effects);
+        effects
+    }
+
+    fn reduce_inner(&mut self, action: Action) -> Vec<Effect> {
         match action {
             // ---- global / cross-screen -------------------------------------
             Action::Quit
@@ -26,7 +34,6 @@ impl State {
             | Action::OpenPalette
             | Action::OpenHelp
             | Action::CloseModal
-            | Action::Notice(_)
             | Action::UiMsg(_)
             | Action::Paste(_)
             | Action::ScrollHistoryDetail(_)
@@ -34,13 +41,13 @@ impl State {
             | Action::PaletteBackspace
             | Action::PaletteMove(_)
             | Action::PaletteEnter
-            | Action::PaletteRunAction(_) => self.reduce_global(action),
+            | Action::PaletteRunAction(_)
+            | Action::FilterEdit(_, _) => self.reduce_global(action),
 
             // ---- setup ------------------------------------------------------
             Action::CycleFocus(_)
             | Action::FocusPane(_)
             | Action::MoveSelection(_)
-            | Action::SearchProviders(_)
             | Action::ClearSearch
             | Action::ToggleFavorite
             | Action::ConnectProvider
@@ -79,8 +86,7 @@ impl State {
             }
 
             // ---- reasoning map ------------------------------------------------
-            Action::MapFilter(_)
-            | Action::MapClear
+            Action::MapClear
             | Action::MapMove(_)
             | Action::CycleModelDefault
             | Action::SetModelDefault
@@ -100,6 +106,21 @@ impl State {
             Action::MouseWheelSetup { .. } => self.reduce_setup(action),
         }
     }
+}
+
+/// Collapse repeated `SavePrefs` effects (bulk launches emit one per
+/// session) into a single disk write per reduce batch.
+fn dedup_save_prefs(effects: &mut Vec<Effect>) {
+    let mut seen = false;
+    effects.retain(|e| {
+        if matches!(e, Effect::SavePrefs) {
+            if seen {
+                return false;
+            }
+            seen = true;
+        }
+        true
+    });
 }
 
 #[cfg(test)]
@@ -125,6 +146,8 @@ mod tests {
             name: id.into(),
             capabilities: lmhub_core::Capabilities {
                 reasoning: true,
+                reasoning_budget_min: None,
+                reasoning_budget_max: None,
                 reasoning_levels: Some(vec![
                     lmhub_core::ReasoningLevel::Off,
                     lmhub_core::ReasoningLevel::Low,
@@ -181,6 +204,7 @@ mod tests {
             task: "t".into(),
             status: RunSessionStatus::Running,
             started: Instant::now(),
+            finished_at: None,
             cancel: Some(CancellationToken::new()),
             transcript: Transcript::default(),
             tokens: Default::default(),
@@ -210,7 +234,7 @@ mod tests {
             "prefs persisted on quit"
         );
         state.reduce(Action::ForceQuit);
-        assert!(state.quit && state.force_quit);
+        assert!(state.quit);
     }
 
     #[test]
@@ -378,7 +402,12 @@ mod tests {
     #[test]
     fn search_ranks_and_filters() {
         let (mut state, _dir) = crate::testutil::test_state();
-        state.reduce(Action::SearchProviders("groq".into()));
+        for c in "groq".chars() {
+            state.reduce(Action::FilterEdit(
+                crate::action::FilterTarget::Providers,
+                crate::action::FilterEdit::Insert(c),
+            ));
+        }
         let rows = state.provider_rows();
         assert!(!rows.is_empty());
         assert!(rows.iter().all(|r| r.group.is_none()), "search is flat");
@@ -402,11 +431,14 @@ mod tests {
     #[test]
     fn model_default_reasoning_snaps_on_selection() {
         let (mut state, _dir) = crate::testutil::test_state();
+        state.setup.selected_provider_id = Some("openai".into());
         // Two models with distinct reasoning sets.
         let m1 = lmhub_core::ModelInfo {
             id: "claude-3-7-sonnet".into(),
             capabilities: lmhub_core::Capabilities {
                 reasoning: true,
+                reasoning_budget_min: None,
+                reasoning_budget_max: None,
                 reasoning_levels: Some(vec![
                     lmhub_core::ReasoningLevel::Off,
                     lmhub_core::ReasoningLevel::Low,
@@ -423,8 +455,8 @@ mod tests {
         assert_eq!(state.selected_reasoning(), lmhub_core::ReasoningLevel::High);
         let effects = state.reduce(Action::SetModelDefault);
         assert_eq!(
-            state.prefs.model_defaults.get("claude-3-7-sonnet"),
-            Some(&lmhub_core::ReasoningLevel::High)
+            state.default_reasoning_for("openai", "claude-3-7-sonnet"),
+            Some(lmhub_core::ReasoningLevel::High)
         );
         assert!(effects.iter().any(|e| matches!(e, Effect::SavePrefs)));
         // Moving away and back snaps to the default.
@@ -438,17 +470,18 @@ mod tests {
     #[test]
     fn reasoning_is_set_per_model_in_setup() {
         let (mut state, _dir) = crate::testutil::test_state();
+        state.setup.selected_provider_id = Some("openai".into());
         state.setup.models = vec![reasoning_model("gpt-4o"), reasoning_model("gpt-4o-mini")];
         state.setup.model_idx = 0;
         state.setup.focus = crate::state::Pane::Models;
         // Arrows edit only the focused model.
         state.reduce(Action::CycleReasoning(2)); // gpt-4o → high
         assert_eq!(
-            state.prefs.model_defaults.get("gpt-4o"),
-            Some(&lmhub_core::ReasoningLevel::High)
+            state.default_reasoning_for("openai", "gpt-4o"),
+            Some(lmhub_core::ReasoningLevel::High)
         );
         assert_eq!(
-            state.prefs.model_defaults.get("gpt-4o-mini"),
+            state.default_reasoning_for("openai", "gpt-4o-mini"),
             None,
             "other model untouched"
         );
@@ -462,8 +495,8 @@ mod tests {
         );
         state.reduce(Action::CycleReasoning(1)); // gpt-4o-mini → low
         assert_eq!(
-            state.prefs.model_defaults.get("gpt-4o-mini"),
-            Some(&lmhub_core::ReasoningLevel::Low)
+            state.default_reasoning_for("openai", "gpt-4o-mini"),
+            Some(lmhub_core::ReasoningLevel::Low)
         );
         // Back to the first model: its own level is retained.
         state.reduce(Action::MoveSelection(-1));
@@ -473,6 +506,7 @@ mod tests {
     #[test]
     fn bulk_run_uses_each_models_own_reasoning_after_navigation() {
         let (mut state, _dir) = crate::testutil::test_state();
+        state.setup.selected_provider_id = Some("openai".into());
         seed_catalog(&mut state, "openai", &["gpt-4o", "gpt-4o-mini"]);
         state.setup.models = vec![reasoning_model("gpt-4o"), reasoning_model("gpt-4o-mini")];
         seed_task_prompts(&mut state, &["build"]);
@@ -500,6 +534,7 @@ mod tests {
     #[test]
     fn bulk_run_clamps_to_model_capabilities() {
         let (mut state, _dir) = crate::testutil::test_state();
+        state.setup.selected_provider_id = Some("openai".into());
         seed_catalog(&mut state, "openai", &["gpt-4o", "gpt-4o-mini"]);
         // Override mini's catalog entry with a non-reasoning model.
         let mut cache = state.setup.catalog_cache.get("openai").unwrap().clone();
@@ -528,13 +563,11 @@ mod tests {
     #[test]
     fn bulk_run_prefers_pinned_default_over_chosen_level() {
         let (mut state, _dir) = crate::testutil::test_state();
+        state.setup.selected_provider_id = Some("openai".into());
         seed_catalog(&mut state, "openai", &["gpt-4o", "gpt-4o-mini"]);
         state.setup.models = vec![reasoning_model("gpt-4o"), reasoning_model("gpt-4o-mini")];
         seed_task_prompts(&mut state, &["build"]);
-        state
-            .prefs
-            .model_defaults
-            .insert("gpt-4o-mini".into(), lmhub_core::ReasoningLevel::Low);
+        state.set_model_default_reasoning("openai", "gpt-4o-mini", lmhub_core::ReasoningLevel::Low);
         state.setup.bulk = std::collections::BTreeSet::from([
             ("openai".into(), "gpt-4o".into()),
             ("openai".into(), "gpt-4o-mini".into()),
@@ -555,6 +588,7 @@ mod tests {
     #[test]
     fn bulk_navigation_keeps_each_models_level_across_pinned_default() {
         let (mut state, _dir) = crate::testutil::test_state();
+        state.setup.selected_provider_id = Some("openai".into());
         seed_catalog(
             &mut state,
             "openai",
@@ -568,10 +602,7 @@ mod tests {
         seed_task_prompts(&mut state, &["build"]);
         // gpt-4o-mini carries a pinned default; navigating onto it must not
         // clobber any other model's own level.
-        state
-            .prefs
-            .model_defaults
-            .insert("gpt-4o-mini".into(), lmhub_core::ReasoningLevel::Low);
+        state.set_model_default_reasoning("openai", "gpt-4o-mini", lmhub_core::ReasoningLevel::Low);
         state.setup.bulk = std::collections::BTreeSet::from([
             ("openai".into(), "gpt-4o".into()),
             ("openai".into(), "gpt-4o-mini".into()),
@@ -585,16 +616,16 @@ mod tests {
         state.reduce(Action::MoveSelection(-1));
         state.reduce(Action::MoveSelection(-1));
         assert_eq!(
-            state.prefs.model_defaults.get("gpt-4o"),
-            Some(&lmhub_core::ReasoningLevel::High)
+            state.default_reasoning_for("openai", "gpt-4o"),
+            Some(lmhub_core::ReasoningLevel::High)
         );
         assert_eq!(
-            state.prefs.model_defaults.get("gpt-4o-mini"),
-            Some(&lmhub_core::ReasoningLevel::Low)
+            state.default_reasoning_for("openai", "gpt-4o-mini"),
+            Some(lmhub_core::ReasoningLevel::Low)
         );
         assert_eq!(
-            state.prefs.model_defaults.get("gpt-4o-turbo"),
-            Some(&lmhub_core::ReasoningLevel::Low)
+            state.default_reasoning_for("openai", "gpt-4o-turbo"),
+            Some(lmhub_core::ReasoningLevel::Low)
         );
         state.reduce(Action::BulkStart);
         state.reduce(Action::ConfirmBulkStart);
@@ -643,31 +674,49 @@ mod tests {
         // First d: skip off → low.
         state.reduce(Action::CycleModelDefault);
         assert_eq!(
-            state.prefs.model_defaults.get("claude-3-7-sonnet"),
-            Some(&lmhub_core::ReasoningLevel::Low)
+            state.default_reasoning_for("anthropic", "claude-3-7-sonnet"),
+            Some(lmhub_core::ReasoningLevel::Low)
         );
         // Second d: high; third d: wraps through off → off.
         state.reduce(Action::CycleModelDefault);
         assert_eq!(
-            state.prefs.model_defaults.get("claude-3-7-sonnet"),
-            Some(&lmhub_core::ReasoningLevel::High)
+            state.default_reasoning_for("anthropic", "claude-3-7-sonnet"),
+            Some(lmhub_core::ReasoningLevel::High)
         );
         state.reduce(Action::CycleModelDefault);
         assert_eq!(
-            state.prefs.model_defaults.get("claude-3-7-sonnet"),
-            Some(&lmhub_core::ReasoningLevel::Off)
+            state.default_reasoning_for("anthropic", "claude-3-7-sonnet"),
+            Some(lmhub_core::ReasoningLevel::Off)
         );
         // And one more lands on low again.
         state.reduce(Action::CycleModelDefault);
         assert_eq!(
-            state.prefs.model_defaults.get("claude-3-7-sonnet"),
-            Some(&lmhub_core::ReasoningLevel::Low)
+            state.default_reasoning_for("anthropic", "claude-3-7-sonnet"),
+            Some(lmhub_core::ReasoningLevel::Low)
+        );
+    }
+
+    #[test]
+    fn bulk_start_warns_about_unknown_prices() {
+        let (mut state, _dir) = crate::testutil::test_state();
+        seed_catalog(&mut state, "openai", &["gpt-4o"]);
+        state.setup.models = vec![reasoning_model("gpt-4o")];
+        seed_task_prompts(&mut state, &["build"]);
+        state.setup.bulk = std::collections::BTreeSet::from([("openai".into(), "gpt-4o".into())]);
+
+        state.reduce(Action::BulkStart);
+        assert!(state.modal.is_some(), "confirmation still opens");
+        let (notice, _) = state.notice.as_ref().expect("pricing warning");
+        assert!(
+            notice.contains("no Models.dev price") && notice.contains("openai/gpt-4o"),
+            "{notice}"
         );
     }
 
     #[test]
     fn bulk_uses_per_model_default_reasoning() {
         let (mut state, _dir) = crate::testutil::test_state();
+        state.setup.selected_provider_id = Some("openai".into());
         seed_catalog(&mut state, "openai", &["gpt-4o", "gpt-4o-mini"]);
         // Both models must actually support reasoning for a pinned level to
         // survive clamping.
@@ -675,6 +724,8 @@ mod tests {
             id: id.into(),
             capabilities: lmhub_core::Capabilities {
                 reasoning: true,
+                reasoning_budget_min: None,
+                reasoning_budget_max: None,
                 reasoning_levels: Some(vec![
                     lmhub_core::ReasoningLevel::Off,
                     lmhub_core::ReasoningLevel::Low,
@@ -686,10 +737,7 @@ mod tests {
         };
         state.setup.models = vec![reasoning_model("gpt-4o"), reasoning_model("gpt-4o-mini")];
         seed_task_prompts(&mut state, &["build"]);
-        state
-            .prefs
-            .model_defaults
-            .insert("gpt-4o-mini".into(), lmhub_core::ReasoningLevel::Low);
+        state.set_model_default_reasoning("openai", "gpt-4o-mini", lmhub_core::ReasoningLevel::Low);
         state.setup.bulk = std::collections::BTreeSet::from([
             ("openai".into(), "gpt-4o".into()),
             ("openai".into(), "gpt-4o-mini".into()),
@@ -705,5 +753,96 @@ mod tests {
         // No default → chosen level (off by default); default set → low.
         assert_eq!(by_model["gpt-4o"], "off");
         assert_eq!(by_model["gpt-4o-mini"], "low");
+    }
+
+    #[test]
+    fn palette_cursor_stays_within_the_filtered_list() {
+        let (mut state, _dir) = crate::testutil::test_state();
+        state.modal = Some(Modal::Palette {
+            filter: "run".into(),
+            cursor: 0,
+        });
+        state.reduce(Action::PaletteMove(1));
+        let Some(Modal::Palette { cursor, .. }) = &state.modal else {
+            panic!("palette closed");
+        };
+        let len = state.filtered_palette("run").len();
+        assert!(len > 0 && *cursor < len, "cursor {cursor} vs len {len}");
+
+        // A filter that matches nothing clamps the cursor and Enter is a
+        // no-op with a notice (the modal stays open).
+        for c in "zzz".chars() {
+            state.reduce(Action::PaletteChar(c));
+        }
+        let Some(Modal::Palette { filter, cursor }) = &state.modal else {
+            panic!("palette closed");
+        };
+        assert!(state.filtered_palette(filter.as_str()).is_empty());
+        assert_eq!(*cursor, 0);
+        let effects = state.reduce(Action::PaletteEnter);
+        assert!(effects.is_empty());
+        assert!(state.modal.is_some(), "empty-list Enter must not execute");
+        assert!(state.notice.is_some());
+    }
+
+    #[test]
+    fn provider_filter_reseats_models_to_the_selected_provider() {
+        let (mut state, _dir) = crate::testutil::test_state();
+        state.setup.selected_provider_id = Some("groq".into());
+        state.setup.models = vec![lmhub_core::ModelInfo::bare("llama-3.1-8b")];
+        // Cache a catalog for the provider the filter will select so the
+        // re-seat resolves without a fetch effect.
+        let cache = crate::state::CachedCatalog::from_catalog(
+            &lmhub_core::ModelCatalog {
+                models: vec![lmhub_core::ModelInfo::bare("claude-sonnet-4-5")],
+                source: None,
+                warnings: Vec::new(),
+            },
+            None,
+        );
+        state
+            .setup
+            .catalog_cache
+            .insert("github-copilot".into(), cache);
+
+        // "github-copilot" uniquely identifies the provider (id/name/type),
+        // unlike "openai" which matches every openai-compatible route.
+        for c in "github-copilot".chars() {
+            state.reduce(Action::FilterEdit(
+                crate::action::FilterTarget::Providers,
+                crate::action::FilterEdit::Insert(c),
+            ));
+        }
+
+        assert_eq!(
+            state.setup.selected_provider_id.as_deref(),
+            Some("github-copilot")
+        );
+        assert_eq!(
+            state
+                .selected_provider()
+                .map(|p| p.id().to_string())
+                .as_deref(),
+            Some("github-copilot"),
+            "provider and model list must agree"
+        );
+        assert_eq!(state.setup.models.len(), 1);
+        assert_eq!(state.setup.models[0].id, "claude-sonnet-4-5");
+    }
+
+    #[test]
+    fn start_run_refuses_a_divergent_provider_model_pair() {
+        let (mut state, _dir) = crate::testutil::test_state();
+        state.setup.selected_provider_id = Some("provider-that-is-not-selected".into());
+        state.setup.models = vec![lmhub_core::ModelInfo::bare("m")];
+        let effects = state.reduce(Action::StartRun);
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::LaunchRun { .. })),
+            "divergent provider/model must not launch"
+        );
+        assert!(state.runs.runs.is_empty());
+        assert!(state.notice.is_some());
     }
 }

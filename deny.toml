@@ -16,14 +16,26 @@ allow = [
 confidence-threshold = 0.8
 
 [bans]
-# Duplicate versions are warned (not denied) so transient split-version
-# deps (syn 1/2, rustix, …) don't block CI; clean them up as they arise.
-multiple-versions = "warn"
-# Crates banned outright, regardless of version.
-deny = [
-    # Assembly/SIMD crates by the same author as `ring` — historically
-    # pulled in only to fix ring build issues; prefer the normal builds.
-    # (placeholder policy — extend as real bans are identified)
+# Duplicate majors are denied; the `skip` list below documents the few
+# transitive splits we cannot avoid (upstream pins), so any *new* duplicate
+# is caught by CI instead of slipping through.
+multiple-versions = "deny"
+# Crates banned outright, regardless of version. Empty for now: the previous
+# placeholder banned nothing; add entries here with a comment explaining why
+# when a real policy need arises.
+deny = []
+skip = [
+    # jsonwebtoken 11.x still pulls getrandom 0.2 (rand 0.8) while the build
+    # toolchain (jobserver/cc → aws-lc-sys) uses getrandom 0.4; no upstream
+    # bump is available yet.
+    { name = "getrandom", version = "=0.2.17" },
+    # hyper-util pins base64 0.22 while reqwest 0.13.5 uses 0.23.
+    { name = "base64", version = "=0.22.1" },
+    # ratatui-core's kasuari dep still uses hashbrown 0.16; lru/ratatui-core
+    # use 0.17.
+    { name = "hashbrown", version = "=0.16.1" },
+    # proc-macro ecosystem splits on syn 2.x/3.x (transitive pins).
+    { name = "syn", version = "=2.0.119" },
 ]
 
 [sources]

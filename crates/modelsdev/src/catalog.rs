@@ -105,6 +105,29 @@ pub struct CostBlock {
 }
 
 impl ModelEntry {
+    /// Declared thinking-budget range `(min, max)` in tokens, when the
+    /// catalog provides one (`reasoning_options.budget_tokens`). Adapters use
+    /// it instead of their hard-coded per-level budgets.
+    pub fn reasoning_budget_range(&self) -> Option<(u64, u64)> {
+        let mut min: Option<f64> = None;
+        let mut max: Option<f64> = None;
+        for option in &self.reasoning_options {
+            if let ReasoningOption::BudgetTokens { min: m, max: x } = option {
+                if let Some(v) = m {
+                    min = Some(min.map_or(*v, |c| c.min(*v)));
+                }
+                if let Some(v) = x {
+                    max = Some(max.map_or(*v, |c| c.max(*v)));
+                }
+            }
+        }
+        let (min, max) = (min?, max?);
+        if !min.is_finite() || !max.is_finite() || min < 0.0 || max <= 0.0 {
+            return None;
+        }
+        Some(((min as u64).min(max as u64), max as u64))
+    }
+
     /// Supported reasoning levels derived from `reasoning_options`
     /// (mirrors opencode's `reasoningVariants`):
     /// - `effort` values map 1:1 (`null` → off), e.g. `["high","max"]`;
@@ -262,6 +285,17 @@ mod tests {
             e.reasoning_levels(),
             Some(vec![ReasoningLevel::High, ReasoningLevel::Max])
         );
+        assert_eq!(e.reasoning_budget_range(), Some((1024, 32000)));
+
+        // A range with a sane min/max even when inverted is normalized.
+        let inverted = entry(r#"[{"type": "budget_tokens", "min": 8000, "max": 2000}]"#);
+        assert_eq!(inverted.reasoning_budget_range(), Some((2000, 2000)));
+
+        // Missing/zero bounds are "unknown", never guessed.
+        let missing = entry(r#"[{"type": "budget_tokens"}]"#);
+        assert_eq!(missing.reasoning_budget_range(), None);
+        let zero = entry(r#"[{"type": "budget_tokens", "min": 0, "max": 0}]"#);
+        assert_eq!(zero.reasoning_budget_range(), None);
     }
 
     #[test]

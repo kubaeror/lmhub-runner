@@ -155,11 +155,41 @@ impl RunEvent {
     }
 }
 
+/// Flatten an event text to one line and cap it for the TUI feed.
+///
+/// Truncation must be char-based: a byte `truncate(297)` panics when the cut
+/// lands inside a multi-byte character (emoji/CJK in model output).
 fn one_line(s: &str) -> String {
-    let mut out = s.replace(['\n', '\r', '\t'], " ");
-    if out.len() > 300 {
-        out.truncate(297);
-        out.push_str("...");
+    let flat = s.replace(['\n', '\r', '\t'], " ");
+    crate::util::truncate_chars(&flat, 300)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn one_line_truncates_on_char_boundaries() {
+        // 396 ASCII bytes + a 4-byte emoji: the old byte-slice truncation at
+        // 297 bytes landed mid-emoji and panicked.
+        let long = format!("{}🦀", "a".repeat(396));
+        let out = one_line(&long);
+        assert_eq!(out.chars().count(), 300);
+        assert!(out.ends_with('…'));
+        assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+
+        // Short strings pass through untouched.
+        assert_eq!(one_line("hello"), "hello");
+        // Newlines/tabs are flattened.
+        let flattened = one_line("a\nb\tc");
+        assert_eq!(flattened, "a b c");
     }
-    out
+
+    #[test]
+    fn one_line_handles_long_multibyte_only_text() {
+        let long = "日本語".repeat(500); // 1500 chars, 4500 bytes
+        let out = one_line(&long);
+        assert_eq!(out.chars().count(), 300);
+        assert!(out.ends_with('…'));
+    }
 }

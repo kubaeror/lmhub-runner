@@ -11,6 +11,7 @@ pub mod provider;
 pub mod redact;
 pub mod stats;
 pub mod usage;
+pub mod util;
 
 pub use auth::{AuthStore, StoredCredential};
 pub use chat::{
@@ -25,7 +26,7 @@ pub use model::{Capabilities, ModelCatalog, ModelInfo, ModelListSource};
 pub use pricing::{ModelPricing, PricingContext};
 pub use prompt::{
     augment_system_prompt, load_prompt, load_task_prompt, DEFAULT_SYSTEM_PROMPT,
-    DEFAULT_TASK_PROMPT,
+    DEFAULT_TASK_PROMPT, TOOL_NAMES,
 };
 pub use provider::{LocalModel, Provider, ProviderCaps};
 pub use stats::{RunStatus, StatisticsDocument};

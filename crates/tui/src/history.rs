@@ -136,8 +136,7 @@ fn format_detail(v: &Value, path: &Path) -> String {
     out.push(String::new());
     out.push("— performance —".to_string());
     out.push(format!(
-        "turns {} · llm requests {} · tps {} · avg {} ms · max {} ms",
-        n2(perf, "turns"),
+        "llm requests {} · tps {} · avg {} ms · max {} ms",
         n2(perf, "llmRequests"),
         perf["tokensPerSecond"]
             .as_f64()
@@ -223,7 +222,7 @@ mod tests {
         "finishedAt": "2026-08-24T00:01:00Z",
         "durationMs": 60000,
         "tokens": { "input": 1000, "output": 200, "total": 1200, "cacheHitRatio": 0.25 },
-        "performance": { "turns": 3, "llmRequests": 3, "tokensPerSecond": 10.0 },
+        "performance": { "llmRequests": 3, "tokensPerSecond": 10.0 },
         "toolCalls": { "total": 2, "successful": 2, "failed": 0 },
         "pricing": { "totalUsd": 0.001, "source": "models.dev" },
         "errors": { "count": 0, "logPath": "errors.log" },

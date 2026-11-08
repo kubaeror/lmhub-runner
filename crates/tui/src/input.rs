@@ -31,11 +31,6 @@ impl EditField {
         self.value.is_empty()
     }
 
-    /// Byte length of the field.
-    pub fn len(&self) -> usize {
-        self.value.len()
-    }
-
     /// Replace the whole value; the cursor moves to the end.
     pub fn set(&mut self, value: impl Into<String>) {
         self.value = value.into();
@@ -81,16 +76,27 @@ impl EditField {
             .unwrap_or(self.value.len());
     }
 
+    /// Move the cursor to the start of the field.
+    pub fn move_home(&mut self) {
+        self.cursor = 0;
+    }
+
+    /// Move the cursor to the end of the field.
+    pub fn move_end(&mut self) {
+        self.cursor = self.value.len();
+    }
+
+    /// Byte offset of the cursor (used to render a real caret).
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
     /// Insert `text` at the cursor. The caller strips control characters
     /// (see `reduce::paste_text`); this just splices chars in order.
     pub fn paste(&mut self, text: &str) {
         for c in text.chars() {
             self.insert(c);
         }
-    }
-
-    pub fn cursor(&self) -> usize {
-        self.cursor
     }
 }
 

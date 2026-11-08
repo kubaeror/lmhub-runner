@@ -133,18 +133,18 @@ impl ModelsDevClient {
     pub async fn load(&self) -> Result<CatalogSnapshot, ModelsDevError> {
         if let Some((data, meta)) = self.read_cache().await {
             if cache_age_ok(&meta, self.ttl) {
-                return Ok(build_snapshot(data, meta, false));
+                return build_snapshot(data, meta, false);
             }
         }
         match self.fetch_fresh().await {
-            Ok((data, meta)) => Ok(build_snapshot(data, meta, false)),
+            Ok((data, meta)) => build_snapshot(data, meta, false),
             Err(fetch_err) => {
                 if let Some((data, meta)) = self.read_cache().await {
                     tracing::warn!(
                         error = %fetch_err,
                         "Models.dev fetch failed; serving stale cached catalog"
                     );
-                    Ok(build_snapshot(data, meta, true))
+                    build_snapshot(data, meta, true)
                 } else {
                     Err(fetch_err)
                 }
@@ -155,7 +155,7 @@ impl ModelsDevClient {
     /// Force a network refresh (TUI action).
     pub async fn refresh(&self) -> Result<CatalogSnapshot, ModelsDevError> {
         let (data, meta) = self.fetch_fresh().await?;
-        Ok(build_snapshot(data, meta, false))
+        build_snapshot(data, meta, false)
     }
 
     pub fn cache_paths(&self) -> (PathBuf, PathBuf) {
@@ -163,14 +163,21 @@ impl ModelsDevClient {
     }
 }
 
-fn build_snapshot(raw: String, meta: SnapshotMeta, stale: bool) -> CatalogSnapshot {
-    let catalog = Catalog::parse(&raw).unwrap_or_default();
-    CatalogSnapshot {
+fn build_snapshot(
+    raw: String,
+    meta: SnapshotMeta,
+    stale: bool,
+) -> Result<CatalogSnapshot, ModelsDevError> {
+    // Never silently serve an empty catalog: a cached blob that no longer
+    // parses is a real error the caller must see (the fetch path validates
+    // before caching, so this only fires for corrupt/hand-edited caches).
+    let catalog = Catalog::parse(&raw).map_err(|e| ModelsDevError::Parse(e.to_string()))?;
+    Ok(CatalogSnapshot {
         catalog,
         fetched_at: meta.fetched_at,
         version: meta.version,
         stale,
-    }
+    })
 }
 
 fn cache_age_ok(meta: &SnapshotMeta, ttl: Duration) -> bool {
@@ -282,6 +289,34 @@ mod tests {
             .expect("claude-sonnet-4-5 present in catalog");
         let pricing = pricing_for(entry).expect("price known");
         assert!(pricing.input_per_million_usd > 0.0);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A cache blob that does not parse must surface as an error, never as a
+    /// silently empty catalog.
+    #[tokio::test]
+    async fn corrupt_cache_is_a_parse_error() {
+        let dir = std::env::temp_dir().join(format!(
+            "lmhub-mdtest-corrupt-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let client = ModelsDevClient::new(dir.clone(), Duration::from_secs(3600));
+        let (data_path, meta_path) = client.cache_paths();
+        std::fs::write(&data_path, "{ not json").unwrap();
+        std::fs::write(
+            &meta_path,
+            serde_json::json!({"fetched_at": lmhub_core::now_ts(), "version": "x"}).to_string(),
+        )
+        .unwrap();
+
+        // Fresh cache → parse path; fetch must not be attempted.
+        let err = match client.load().await {
+            Ok(_) => panic!("corrupt cache must error"),
+            Err(e) => e,
+        };
+        assert!(matches!(err, ModelsDevError::Parse(_)), "{err:?}");
 
         let _ = std::fs::remove_dir_all(dir);
     }

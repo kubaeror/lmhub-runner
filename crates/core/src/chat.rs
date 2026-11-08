@@ -148,6 +148,10 @@ pub struct ChatMessage {
     #[serde(default)]
     pub tool_name: Option<String>,
     pub is_error: bool,
+    /// Adapter-specific raw assistant blocks from the previous turn, echoed
+    /// back verbatim on the next request. This is the *history* side of the
+    /// pair: Anthropic thinking signatures, Gemini thought parts and similar
+    /// unparseable state live here (wire fidelity invariant).
     pub provider_state: Option<Value>,
 }
 
@@ -234,6 +238,10 @@ pub struct ChatRequest {
     pub tools: Vec<ToolSpec>,
     pub reasoning: ReasoningLevel,
     pub max_tokens: u32,
+    /// Explicit thinking budget in tokens when the model declares one
+    /// (models.dev `reasoning_options.budget_tokens`); adapters otherwise
+    /// derive it from the reasoning level constants.
+    pub thinking_budget: Option<u32>,
     /// Ask the adapter to use prompt caching when supported.
     /// Adapters must degrade gracefully when it is not.
     pub enable_prompt_cache: bool,
@@ -248,6 +256,7 @@ impl ChatRequest {
             tools: Vec::new(),
             reasoning: ReasoningLevel::Off,
             max_tokens: 16_384,
+            thinking_budget: None,
             enable_prompt_cache: true,
         }
     }
@@ -269,6 +278,12 @@ impl ChatRequest {
 
     pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
         self.max_tokens = max_tokens;
+        self
+    }
+
+    /// Set the explicit thinking budget (tokens) for this request.
+    pub fn with_thinking_budget(mut self, budget: Option<u32>) -> Self {
+        self.thinking_budget = budget;
         self
     }
 
@@ -391,6 +406,10 @@ pub struct ChatResponse {
     pub usage: Usage,
     pub stop_reason: StopReason,
     /// Adapter-specific raw assistant payload to be echoed back in history.
+    /// This is the *response* side of the pair with
+    /// [`ChatMessage::provider_state`]: the agent copies it into the
+    /// assistant history message unchanged, so signed/opaque blocks survive
+    /// round-trips.
     pub raw_assistant_message: Option<Value>,
     /// Non-fatal issues detected by the adapter (retries, fallbacks).
     pub warnings: Vec<String>,

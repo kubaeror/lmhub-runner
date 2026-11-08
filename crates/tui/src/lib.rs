@@ -49,7 +49,7 @@ use lmhub_providers::ProviderRegistry;
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 pub struct PromptFile {
@@ -95,26 +95,143 @@ pub struct TuiContext {
 /// UI tick: how often the screen redraws even without input/events.
 const TICK_INTERVAL: Duration = Duration::from_millis(200);
 
-pub async fn run_tui(ctx: TuiContext) -> anyhow::Result<()> {
-    use anyhow::Context as _;
-    enable_raw_mode().context("TUI requires an interactive terminal (run inside a real tty)")?;
-    let mut stdout = std::io::stdout();
-    execute!(
-        stdout,
-        EnterAlternateScreen,
-        EnableMouseCapture,
+/// Minimum time between background redraws (~30 fps). Input and non-delta
+/// messages force an immediate draw regardless.
+const MIN_FRAME_INTERVAL: Duration = Duration::from_millis(33);
+
+/// Raw terminal-event channel capacity (bursts of pasted/typing events).
+const KEY_CHANNEL_CAPACITY: usize = 128;
+
+/// Grace period for cancelled runs to write statistics.json on quit.
+const QUIT_GRACE: Duration = Duration::from_secs(5);
+
+/// Streaming text accumulated between UI ticks (per run).
+#[derive(Default)]
+struct PendingDeltas {
+    text: String,
+    /// Raw delta count (the UI reports tokens, not flushes).
+    count: u64,
+    ts: String,
+    turn: u32,
+}
+
+/// Replay buffered deltas through the reducer as one `LlmDelta` per run.
+fn flush_pending_deltas(
+    state: &mut State,
+    pending: &mut std::collections::HashMap<u64, PendingDeltas>,
+) {
+    if pending.is_empty() {
+        return;
+    }
+    for (run_id, p) in pending.drain() {
+        if p.text.is_empty() {
+            continue;
+        }
+        let effects = state.reduce(Action::UiMsg(UiMsg::RunEvent {
+            run_id,
+            event: lmhub_core::RunEvent::LlmDelta {
+                ts: p.ts,
+                turn: p.turn,
+                text: p.text,
+            },
+        }));
+        run_effects(state, effects);
+        // The reducer counted one event; restore the true delta count.
+        let extra = p.count.saturating_sub(1);
+        if extra > 0 {
+            if let Some(run) = state.runs.find_mut(run_id) {
+                run.delta_count += extra;
+            }
+        }
+    }
+}
+
+/// RAII terminal state: raw mode, alternate screen, mouse capture and
+/// bracketed paste. `Drop` restores all of it — early `?` returns and panics
+/// can no longer leave the user with a broken/raw terminal.
+struct TerminalGuard {
+    active: bool,
+}
+
+impl TerminalGuard {
+    fn enter() -> anyhow::Result<Self> {
+        use anyhow::Context as _;
+        enable_raw_mode()
+            .context("TUI requires an interactive terminal (run inside a real tty)")?;
+        let mut guard = Self { active: true };
+        let mut stdout = std::io::stdout();
         // Bracketed paste: pasted text arrives as a single `Event::Paste`
         // instead of a burst of key events (which would trigger app-level
         // bindings like `q` quit or `x` bulk-run from pasted content).
-        EnableBracketedPaste
-    )
-    .context("entering alternate screen failed")?;
+        if let Err(e) = execute!(
+            stdout,
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            EnableBracketedPaste
+        ) {
+            guard.restore();
+            return Err(anyhow::Error::new(e).context("entering alternate screen failed"));
+        }
+        Ok(guard)
+    }
+
+    /// Idempotent: a second call is a no-op (explicit restore + Drop).
+    fn restore(&mut self) {
+        if !self.active {
+            return;
+        }
+        self.active = false;
+        let mut stdout = std::io::stdout();
+        // Order matters: disable input modes before leaving the alt screen.
+        let _ = execute!(
+            stdout,
+            DisableBracketedPaste,
+            DisableMouseCapture,
+            LeaveAlternateScreen
+        );
+        let _ = disable_raw_mode();
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        self.restore();
+    }
+}
+
+/// Restore the terminal *before* the default hook prints the panic, and put
+/// the panic into the log file.
+///
+/// This intentionally also fires for panics the agent loop catches and turns
+/// into error results: restoring the terminal early is harmless compared to
+/// a corrupted screen, and the run's statistics are still written.
+fn install_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let mut stdout = std::io::stdout();
+        let _ = execute!(
+            stdout,
+            DisableBracketedPaste,
+            DisableMouseCapture,
+            LeaveAlternateScreen
+        );
+        let _ = disable_raw_mode();
+        tracing::error!("panic: {info}");
+        default_hook(info);
+    }));
+}
+
+pub async fn run_tui(ctx: TuiContext) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    let _guard = TerminalGuard::enter()?;
+    install_panic_hook();
+
     let backend = CrosstermBackend::new(std::io::stdout());
     let mut terminal = Terminal::new(backend).context("terminal backend init failed")?;
 
     // UI channel is owned by the app so handlers can spawn async work.
     let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiMsg>();
-    let (key_tx, mut key_rx) = mpsc::channel::<Event>(128);
+    let (key_tx, mut key_rx) = mpsc::channel::<Event>(KEY_CHANNEL_CAPACITY);
 
     // Blocking input reader on its own thread; forwards raw events.
     std::thread::spawn(move || {
@@ -134,20 +251,65 @@ pub async fn run_tui(ctx: TuiContext) -> anyhow::Result<()> {
     // Geometry of the last drawn frame — consumed by mouse click mapping.
     let mut layout = view::RenderInfo::default();
 
+    // Delta coalescing: streaming text is accumulated per run and flushed on
+    // the next tick (or when any non-delta message arrives), so a fast
+    // provider cannot force a reducer pass + redraw per token.
+    let mut pending_deltas: std::collections::HashMap<u64, PendingDeltas> =
+        std::collections::HashMap::new();
+    // Frame throttle: at most ~30 fps unless input forces an immediate draw.
+    let mut last_draw = Instant::now() - MIN_FRAME_INTERVAL;
+    let mut force_draw = true;
+
     let result = loop {
-        // ratatui 0.30's draw returns CompletedFrame; the frame's RenderInfo
-        // is captured into `layout` for mouse mapping by the closure itself.
-        terminal.draw(|f| layout = view::draw(f, &state))?;
+        if force_draw || last_draw.elapsed() >= MIN_FRAME_INTERVAL {
+            // ratatui 0.30's draw returns CompletedFrame; the frame's
+            // RenderInfo is captured into `layout` for mouse mapping by the
+            // closure itself.
+            terminal.draw(|f| layout = view::draw(f, &state))?;
+            last_draw = Instant::now();
+            force_draw = false;
+        }
         tokio::select! {
-            _ = tick.tick() => {}
+            _ = tick.tick() => {
+                flush_pending_deltas(&mut state, &mut pending_deltas);
+                force_draw = true;
+            }
             ev = key_rx.recv() => match ev {
-                Some(event) => handle_input(&mut state, &layout, event),
+                Some(event) => {
+                    flush_pending_deltas(&mut state, &mut pending_deltas);
+                    handle_input(&mut state, &layout, event);
+                    force_draw = true;
+                }
                 None => break Ok(()),
             },
             msg = ui_rx.recv() => match msg {
+                Some(UiMsg::RunEvent { run_id, event }) => {
+                    match event {
+                        lmhub_core::RunEvent::LlmDelta { ts, turn, text } => {
+                            let entry = pending_deltas.entry(run_id).or_default();
+                            entry.text.push_str(&text);
+                            entry.count += 1;
+                            entry.ts = ts;
+                            entry.turn = turn;
+                        }
+                        other => {
+                            flush_pending_deltas(&mut state, &mut pending_deltas);
+                            let effects = state.reduce(Action::UiMsg(UiMsg::RunEvent {
+                                run_id,
+                                event: other,
+                            }));
+                            run_effects(&mut state, effects);
+                        }
+                    }
+                }
                 Some(m) => {
+                    flush_pending_deltas(&mut state, &mut pending_deltas);
+                    if matches!(m, UiMsg::RunFinished { .. }) {
+                        flush_pending_deltas(&mut state, &mut pending_deltas);
+                    }
                     let effects = state.reduce(Action::UiMsg(m));
                     run_effects(&mut state, effects);
+                    force_draw = true;
                 }
                 None => break Ok(()),
             },
@@ -167,7 +329,7 @@ pub async fn run_tui(ctx: TuiContext) -> anyhow::Result<()> {
         .filter(|r| r.status != state::RunSessionStatus::Finished)
         .count();
     if unfinished > 0 {
-        let grace = tokio::time::timeout(Duration::from_secs(5), async {
+        let grace = tokio::time::timeout(QUIT_GRACE, async {
             loop {
                 let still = state
                     .runs
@@ -196,13 +358,8 @@ pub async fn run_tui(ctx: TuiContext) -> anyhow::Result<()> {
     }
 
     state.prefs.save(&state.prefs_path);
-    execute!(std::io::stdout(), DisableMouseCapture)?;
-    disable_raw_mode()?;
-    execute!(
-        std::io::stdout(),
-        LeaveAlternateScreen,
-        DisableBracketedPaste
-    )?;
+    // The TerminalGuard restores raw mode / alt screen / mouse / paste on
+    // drop — including the error paths above.
     result
 }
 
@@ -298,6 +455,32 @@ fn run_effects(state: &mut State, effects: Vec<Effect>) {
                 });
             }
             Effect::SavePrefs => state.prefs.save(&state.prefs_path),
+            Effect::SaveConfig => {
+                let cfg = state.config.clone();
+                let path = state.config_path.clone();
+                let tx = state.ui_tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    if let Err(e) = cfg.save(&path) {
+                        let _ = tx.send(UiMsg::Notice(format!("✖ could not save config: {e}")));
+                    }
+                });
+            }
+            Effect::SaveKey { provider_id, key } => {
+                let store = std::sync::Arc::clone(&state.auth_store);
+                let tx = state.ui_tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    let result = {
+                        let mut store = store.lock().unwrap_or_else(|e| e.into_inner());
+                        store.set_credential(&provider_id, lmhub_core::StoredCredential::api(key));
+                        store.save()
+                    };
+                    let msg = match result {
+                        Ok(()) => format!("saved key for {provider_id}"),
+                        Err(e) => format!("✖ saving auth.json failed: {e}"),
+                    };
+                    let _ = tx.send(UiMsg::Notice(msg));
+                });
+            }
             Effect::RunCopilotFlow => {
                 let tx = state.ui_tx.clone();
                 let auth_store = std::sync::Arc::clone(&state.auth_store);
@@ -316,8 +499,21 @@ fn run_effects(state: &mut State, effects: Vec<Effect>) {
                 let opener = "open";
                 #[cfg(not(target_os = "macos"))]
                 let opener = "xdg-open";
-                match std::process::Command::new(opener).arg(&dir).spawn() {
-                    Ok(_) => state.push_notice(format!("opened {}", dir.display())),
+                // Detached child, no inherited stdio, reaped off-thread so
+                // the UI never blocks on the opener.
+                match std::process::Command::new(opener)
+                    .arg(&dir)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                {
+                    Ok(mut child) => {
+                        state.push_notice(format!("opened {}", dir.display()));
+                        std::thread::spawn(move || {
+                            let _ = child.wait();
+                        });
+                    }
                     Err(e) => state.push_notice(format!("✖ could not open {}: {e}", dir.display())),
                 }
             }
@@ -341,6 +537,8 @@ fn build_agent_spec(state: &State, run_id: u64) -> Option<lmhub_agent::RunSpec> 
         enable_prompt_cache: true,
         max_turns: state.config.max_turns,
         max_output_tokens: state.config.max_output_tokens,
+        max_history_tokens: state.config.max_history_tokens,
+        tool_result_max_bytes: state.config.tool_result_max_bytes,
         deadline: state.config.run_timeout(),
         cancel,
         sandbox: lmhub_sandbox::SandboxConfig {
@@ -349,6 +547,9 @@ fn build_agent_spec(state: &State, run_id: u64) -> Option<lmhub_agent::RunSpec> 
             read_file_max_bytes: state.config.read_file_max_bytes,
             write_file_max_bytes: state.config.write_file_max_bytes,
             runtime: state.sandbox_runtime.clone(),
+            allow_legacy_commands: state.config.legacy_commands_allowed(),
+            walk_max_depth: state.config.walk_max_depth as usize,
+            walk_max_entries: state.config.walk_max_entries as usize,
         },
     })
 }
@@ -371,4 +572,29 @@ fn spawn_run(ui_tx: mpsc::UnboundedSender<UiMsg>, run_id: u64, spec: lmhub_agent
         };
         let _ = app_tx.send(UiMsg::RunFinished { run_id, result });
     });
+}
+
+#[cfg(test)]
+mod terminal_guard_tests {
+    use super::*;
+
+    #[test]
+    fn restore_is_idempotent_and_deactivates() {
+        let mut guard = TerminalGuard { active: true };
+        guard.restore();
+        assert!(!guard.active);
+        // Second restore (e.g. explicit restore followed by Drop) is a no-op.
+        guard.restore();
+        assert!(!guard.active);
+    }
+
+    #[test]
+    fn guard_drops_cleanly_while_unwinding() {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = TerminalGuard { active: true };
+            panic!("simulated reducer panic");
+        }));
+        assert!(result.is_err(), "panic must propagate after guard drop");
+    }
 }

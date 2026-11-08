@@ -14,6 +14,7 @@
 use crate::credentials;
 use crate::http;
 use crate::sigv4;
+use crate::wire_common::urlencode;
 use lmhub_core::{
     ChatRequest, ChatResponse, CoreError, Result, Role, StopReason, ToolCallRequest, Usage,
 };
@@ -110,19 +111,6 @@ pub fn converse_url(region: &str, model_id: &str) -> String {
     )
 }
 
-fn urlencode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
-            }
-            other => out.push_str(&format!("%{other:02X}")),
-        }
-    }
-    out
-}
-
 pub fn build_payload(request: &ChatRequest) -> Value {
     let mut messages = Vec::with_capacity(request.messages.len());
     for msg in &request.messages {
@@ -149,16 +137,36 @@ pub fn build_payload(request: &ChatRequest) -> Value {
             }
             Role::Tool => {
                 let status = if msg.is_error { "error" } else { "success" };
-                messages.push(json!({
-                    "role": "user",
-                    "content": [{
-                        "toolResult": {
-                            "toolUseId": msg.tool_call_id.clone().unwrap_or_default(),
-                            "content": [{"text": msg.content}],
-                            "status": status,
-                        },
-                    }],
-                }));
+                let block = json!({
+                    "toolResult": {
+                        "toolUseId": msg.tool_call_id.clone().unwrap_or_default(),
+                        "content": [{"text": msg.content}],
+                        "status": status,
+                    },
+                });
+                // Converse requires strict user/assistant alternation: parallel
+                // tool calls must be answered by ONE user message holding all
+                // toolResult blocks, not one user message per result.
+                let merge_into_last = messages.last_mut().filter(|last| {
+                    last.get("role").and_then(|r| r.as_str()) == Some("user")
+                        && last
+                            .get("content")
+                            .and_then(|c| c.as_array())
+                            .map(|blocks| blocks.iter().any(|b| b.get("toolResult").is_some()))
+                            .unwrap_or(false)
+                });
+                match merge_into_last {
+                    Some(last) => {
+                        if let Some(blocks) = last.get_mut("content").and_then(|c| c.as_array_mut())
+                        {
+                            blocks.push(block);
+                        }
+                    }
+                    None => messages.push(json!({
+                        "role": "user",
+                        "content": [block],
+                    })),
+                }
             }
         }
     }
@@ -232,12 +240,24 @@ pub fn parse_response(
 
     let usage_json = body.get("usage").cloned().unwrap_or(Value::Null);
     let u = &usage_json;
+    let cache_read = u.get("cacheReadInputTokens").and_then(|v| v.as_u64());
+    let cache_write = u.get("cacheWriteInputTokens").and_then(|v| v.as_u64());
+    // AWS prompt-caching semantics: `inputTokens` counts only the non-cached
+    // input; our convention is `input = plain + cacheRead + cacheWrite` so
+    // billed input (input - cacheRead - cacheWrite) stays non-negative and
+    // cacheHitRatio <= 1.
+    let input_tokens = u
+        .get("inputTokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0)
+        .saturating_add(cache_read.unwrap_or(0))
+        .saturating_add(cache_write.unwrap_or(0));
     let usage = Usage {
-        input_tokens: u.get("inputTokens").and_then(|v| v.as_u64()).unwrap_or(0),
+        input_tokens,
         output_tokens: u.get("outputTokens").and_then(|v| v.as_u64()).unwrap_or(0),
         reasoning_tokens: u.get("reasoningTokens").and_then(|v| v.as_u64()),
-        cache_read_tokens: u.get("cacheReadInputTokens").and_then(|v| v.as_u64()),
-        cache_write_tokens: u.get("cacheWriteInputTokens").and_then(|v| v.as_u64()),
+        cache_read_tokens: cache_read,
+        cache_write_tokens: cache_write,
     };
 
     Ok(ChatResponse {
@@ -324,7 +344,7 @@ pub async fn chat(
         &url,
         headers,
         Some(body_str),
-        crate::http::REQUEST_TIMEOUT,
+        Some(crate::http::REQUEST_TIMEOUT),
     )
     .await?;
     let status = response.status();
@@ -358,7 +378,7 @@ fn truncate(body: &str) -> String {
 mod tests {
     use super::*;
     use crate::wire_test_util::sample_request;
-    use lmhub_core::ChatMessage;
+    use lmhub_core::{ChatMessage, ReasoningLevel};
 
     #[test]
     fn payload_maps_tools_results_and_system() {
@@ -408,9 +428,87 @@ mod tests {
         let resp = parse_response(&body, 10, Vec::new()).unwrap();
         assert_eq!(resp.text, "using tool");
         assert_eq!(resp.tool_calls[0].id, "tu1");
-        assert_eq!(resp.usage.input_tokens, 100);
+        // AWS separates cached input; our convention folds it into `input`.
+        assert_eq!(resp.usage.input_tokens, 125);
         assert_eq!(resp.usage.cache_read_tokens, Some(20));
+        assert_eq!(resp.usage.cache_write_tokens, Some(5));
+        assert!(resp.usage.cache_hit_ratio().unwrap() <= 1.0);
+        assert!(resp.usage.input_tokens >= 20 + 5, "billed input >= 0");
         assert_eq!(resp.stop_reason, StopReason::ToolUse);
+    }
+
+    #[test]
+    fn usage_without_cache_tokens_is_unchanged() {
+        let body = json!({
+            "output": {"message": {"role": "assistant", "content": [{"text": "hi"}]}},
+            "stopReason": "end_turn",
+            "usage": {"inputTokens": 10, "outputTokens": 2}
+        });
+        let resp = parse_response(&body, 1, Vec::new()).unwrap();
+        assert_eq!(resp.usage.input_tokens, 10);
+        assert_eq!(resp.usage.cache_read_tokens, None);
+        assert_eq!(resp.usage.cache_write_tokens, None);
+    }
+
+    /// Parallel tool calls must be answered by ONE user message with two
+    /// toolResult blocks (Converse enforces user/assistant alternation).
+    #[test]
+    fn parallel_tool_results_merge_into_one_user_message() {
+        let mut req = sample_request(ReasoningLevel::Off);
+        req.messages = vec![
+            ChatMessage::user("task"),
+            ChatMessage {
+                role: Role::Assistant,
+                content: String::new(),
+                tool_calls: vec![
+                    ToolCallRequest {
+                        id: "c1".into(),
+                        name: "read_file".into(),
+                        arguments: json!({"path": "a"}),
+                    },
+                    ToolCallRequest {
+                        id: "c2".into(),
+                        name: "read_file".into(),
+                        arguments: json!({"path": "b"}),
+                    },
+                ],
+                ..Default::default()
+            },
+            ChatMessage::tool_result("c1", "body a", false),
+            ChatMessage::tool_result("c2", "body b", true),
+        ];
+        let p = build_payload(&req);
+        let msgs = p["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 3, "expected user/assistant/user: {msgs:?}");
+        assert_eq!(msgs[2]["role"], json!("user"));
+        let blocks = msgs[2]["content"].as_array().unwrap();
+        assert_eq!(
+            blocks.len(),
+            2,
+            "two toolResults in one message: {blocks:?}"
+        );
+        assert_eq!(blocks[0]["toolResult"]["toolUseId"], json!("c1"));
+        assert_eq!(blocks[0]["toolResult"]["status"], json!("success"));
+        assert_eq!(blocks[1]["toolResult"]["toolUseId"], json!("c2"));
+        assert_eq!(blocks[1]["toolResult"]["status"], json!("error"));
+    }
+
+    /// A real user message following tool results must not be merged into.
+    #[test]
+    fn tool_results_do_not_merge_into_plain_user_messages() {
+        let mut req = sample_request(ReasoningLevel::Off);
+        req.messages = vec![
+            ChatMessage::user("task"),
+            ChatMessage::tool_result("c1", "body", false),
+            ChatMessage::user("new instruction"),
+            ChatMessage::tool_result("c2", "body 2", false),
+        ];
+        let p = build_payload(&req);
+        let msgs = p["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 4, "{msgs:?}");
+        assert_eq!(msgs[1]["content"].as_array().unwrap().len(), 1);
+        assert_eq!(msgs[2]["content"][0]["text"], json!("new instruction"));
+        assert_eq!(msgs[3]["content"].as_array().unwrap().len(), 1);
     }
 
     #[test]

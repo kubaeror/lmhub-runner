@@ -25,13 +25,14 @@ pub mod stream_runner;
 pub mod vertex;
 
 mod wire_anthropic;
+mod wire_common;
 mod wire_openai;
 #[cfg(test)]
 mod wire_test_util;
 
 pub use anthropic::NativeAnthropicProvider;
 pub use config::{CustomProvider, CustomProviderConfig};
-pub use http::{init_retry_policy, RetryPolicy};
+pub use http::{init_retry_policy, init_stream_idle_timeout, RetryPolicy};
 pub use known::ProtocolKind;
 pub use openai::NativeOpenAiProvider;
 pub use registry::{

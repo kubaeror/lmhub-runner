@@ -17,15 +17,27 @@ use lmhub_core::{
 use serde_json::{json, Value};
 use std::time::Instant;
 
+/// Map a reasoning level to a Gemini `thinkingBudget`.
+///
+/// `Off` maps to `0` (not `None`): Gemini 2.5 models think by default, so
+/// omitting `thinkingConfig` does NOT disable thinking — the model must be
+/// told `thinkingBudget: 0`. Models without thinking support reject the
+/// config and the adapter degrades by retrying without it.
 pub fn thinking_budget(level: ReasoningLevel) -> Option<i64> {
     match level {
-        ReasoningLevel::Off => None,
+        ReasoningLevel::Off => Some(0),
         // Gemini's thinkingBudget floor is 1024; the API's ceiling (24576)
         // is shared by the strongest levels.
         ReasoningLevel::Minimal | ReasoningLevel::Low => Some(1_024),
         ReasoningLevel::Medium => Some(8_192),
         ReasoningLevel::High | ReasoningLevel::XHigh | ReasoningLevel::Max => Some(24_576),
     }
+}
+
+/// True when a provider error names `thinkingConfig`/`thinkingBudget`
+/// (server rejects the thinking configuration).
+pub fn is_thinking_rejection(msg: &str) -> bool {
+    msg.to_ascii_lowercase().contains("thinking")
 }
 
 pub fn chat_url(base_url: &str, model: &str) -> String {
@@ -37,6 +49,16 @@ pub fn chat_url(base_url: &str, model: &str) -> String {
 }
 
 pub fn build_payload(request: &ChatRequest) -> Value {
+    build_payload_inner(request, true)
+}
+
+/// [`build_payload`] without any `thinkingConfig` — the degradation target
+/// when a server rejects thinking.
+pub fn build_payload_without_thinking(request: &ChatRequest) -> Value {
+    build_payload_inner(request, false)
+}
+
+fn build_payload_inner(request: &ChatRequest, include_thinking: bool) -> Value {
     let mut payload = json!({
         "contents": contents_to_wire(&request.messages),
     });
@@ -49,14 +71,23 @@ pub fn build_payload(request: &ChatRequest) -> Value {
 
     // maxOutputTokens must exceed the thinking budget when thinking is
     // enabled (mirrors the Anthropic wire layer).
+    let thinking = include_thinking
+        .then(|| {
+            // A model-declared budget (models.dev) wins over the constants.
+            request
+                .thinking_budget
+                .map(|b| b as i64)
+                .or_else(|| thinking_budget(request.reasoning))
+        })
+        .flatten();
     let mut max_output = request.max_tokens;
-    if let Some(budget) = thinking_budget(request.reasoning) {
+    if let Some(budget) = thinking {
         if (max_output as i64) <= budget {
             max_output = (budget + 1_024) as u32;
         }
     }
     let mut generation_config = json!({"maxOutputTokens": max_output});
-    if let Some(budget) = thinking_budget(request.reasoning) {
+    if let Some(budget) = thinking {
         generation_config["thinkingConfig"] = json!({"thinkingBudget": budget});
     }
     payload["generationConfig"] = generation_config;
@@ -142,18 +173,22 @@ pub fn parse_response(
             text_parts.push(text.to_string());
         }
         if let Some(call) = part.get("functionCall") {
+            let name = call
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            // Prefer the provider's functionCall.id; synthesize a stable one
+            // only when the wire omits it.
+            let id = call
+                .get("id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .unwrap_or_else(|| format!("call-{name}"));
             tool_calls.push(ToolCallRequest {
-                id: format!(
-                    "call-{}",
-                    call.get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown")
-                ),
-                name: call
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
+                id,
+                name,
                 arguments: call.get("args").cloned().unwrap_or_else(|| json!({})),
             });
         }
@@ -246,9 +281,30 @@ pub async fn chat(
     let url = chat_url(base_url, &request.model);
     let headers = vec![("x-goog-api-key".to_string(), api_key.to_string())];
     let started = Instant::now();
-    let body = http::post_json(http_client, &url, headers, &build_payload(request)).await?;
-    let duration_ms = started.elapsed().as_millis() as u64;
-    parse_response(&body, duration_ms, Vec::new())
+    match http::post_json(http_client, &url, headers.clone(), &build_payload(request)).await {
+        Ok(body) => {
+            let duration_ms = started.elapsed().as_millis() as u64;
+            parse_response(&body, duration_ms, Vec::new())
+        }
+        Err(CoreError::Provider(msg)) if is_thinking_rejection(&msg) => {
+            // Degrade once: the model does not accept thinkingConfig (some
+            // don't support thinking at all). Retry without it and warn.
+            let body = http::post_json(
+                http_client,
+                &url,
+                headers,
+                &build_payload_without_thinking(request),
+            )
+            .await?;
+            let duration_ms = started.elapsed().as_millis() as u64;
+            parse_response(
+                &body,
+                duration_ms,
+                vec!["provider rejected `thinkingConfig`; retried without it".to_string()],
+            )
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[cfg(test)]
@@ -344,6 +400,79 @@ mod tests {
             "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent"
         );
     }
+
+    #[test]
+    fn off_disables_thinking_with_budget_zero() {
+        // Gemini 2.5 thinks by default; `off` must send an explicit zero
+        // budget instead of omitting the config.
+        let req = sample_request(ReasoningLevel::Off);
+        let p = build_payload(&req);
+        assert_eq!(
+            p["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+            json!(0)
+        );
+    }
+
+    #[test]
+    fn payload_without_thinking_omits_the_config() {
+        let req = sample_request(ReasoningLevel::High);
+        let p = build_payload_without_thinking(&req);
+        assert!(p["generationConfig"].get("thinkingConfig").is_none(), "{p}");
+    }
+
+    #[test]
+    fn model_declared_budget_overrides_the_level_constant() {
+        let mut req = sample_request(ReasoningLevel::High);
+        req.thinking_budget = Some(4_000);
+        let p = build_payload(&req);
+        assert_eq!(
+            p["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+            json!(4_000)
+        );
+        assert_eq!(
+            p["generationConfig"]["maxOutputTokens"],
+            json!(5_024),
+            "budget + 1024 headroom"
+        );
+    }
+
+    #[tokio::test]
+    async fn thinking_rejection_retries_without_config() {
+        use crate::wire_test_util::two_shot_server;
+        let reject = json!({
+            "error": {"code": 400, "status": "INVALID_ARGUMENT",
+                      "message": "Thinking is not supported for this model."}
+        })
+        .to_string();
+        let ok = json!({
+            "candidates": [{"finishReason": "STOP",
+                            "content": {"role": "model", "parts": [{"text": "plain"}]}}],
+            "usageMetadata": {"promptTokenCount": 3, "candidatesTokenCount": 1}
+        })
+        .to_string();
+        let (base, rx) = two_shot_server(400, reject, ok).await;
+
+        let req = sample_request(ReasoningLevel::High);
+        let resp = chat(&reqwest::Client::new(), &base, "key-1234567890", &req)
+            .await
+            .unwrap();
+        assert_eq!(resp.text, "plain");
+        assert!(
+            resp.warnings.iter().any(|w| w.contains("thinkingConfig")),
+            "degradation must be reported: {:?}",
+            resp.warnings
+        );
+
+        let (first, second) = rx.await.unwrap();
+        assert!(
+            first.contains("\"thinkingConfig\""),
+            "first attempt carries thinkingConfig: {first}"
+        );
+        assert!(
+            !second.contains("thinkingConfig"),
+            "retry must omit thinkingConfig: {second}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -396,6 +525,29 @@ impl GeminiStreamAccumulator {
     }
 
     pub fn finish(self, duration_ms: u64) -> Result<ChatResponse> {
+        // Mirror the OpenAI/Anthropic empty-stream contract: no parts and no
+        // token accounting means the provider gave us nothing meaningful.
+        let usage_has_tokens = self
+            .usage
+            .as_ref()
+            .map(|u| {
+                [
+                    "promptTokenCount",
+                    "candidatesTokenCount",
+                    "totalTokenCount",
+                ]
+                .iter()
+                .any(|k| u.get(*k).and_then(|v| v.as_u64()).unwrap_or(0) > 0)
+            })
+            .unwrap_or(false);
+        if self.parts.is_empty() && !usage_has_tokens {
+            return Err(CoreError::Parse(
+                "provider returned an empty stream (no content or usage) — usually a rate limit, \
+                 an unavailable model, or a reasoning level the model rejects; check the \
+                 provider's quota and the requested reasoning level"
+                    .into(),
+            ));
+        }
         // Merge adjacent text parts so chunked text is not joined with '\n'
         // by parse_response.
         let mut merged: Vec<Value> = Vec::with_capacity(self.parts.len());
@@ -450,6 +602,24 @@ mod stream_tests {
         assert_eq!(resp.usage.output_tokens, 9); // 7 + 2 thoughts
         assert_eq!(resp.usage.reasoning_tokens, Some(2));
         assert_eq!(resp.usage.cache_read_tokens, Some(10));
+    }
+
+    #[test]
+    fn empty_stream_is_parse_error() {
+        let err = GeminiStreamAccumulator::new().finish(1).unwrap_err();
+        assert!(matches!(err, CoreError::Parse(_)), "{err:?}");
+    }
+
+    #[test]
+    fn usage_only_stream_is_not_an_error() {
+        let mut acc = GeminiStreamAccumulator::new();
+        let _ = acc.feed(&json!({
+            "usageMetadata": {"promptTokenCount": 3, "candidatesTokenCount": 0,
+                              "totalTokenCount": 3}
+        }));
+        let resp = acc.finish(2).unwrap();
+        assert!(resp.text.is_empty());
+        assert_eq!(resp.usage.input_tokens, 3);
     }
 }
 

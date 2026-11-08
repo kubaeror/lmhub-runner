@@ -6,7 +6,6 @@ use crate::action::{Action, Effect};
 use crate::input::EditField;
 use crate::state::{Modal, Pane, RunSession, RunSessionStatus, State};
 use crate::transcript::Transcript;
-use lmhub_core::StoredCredential;
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -29,15 +28,10 @@ impl State {
                 Pane::Task => self.move_task_prompt(delta),
                 _ => Vec::new(),
             },
-            Action::SearchProviders(text) => {
-                self.setup.provider_filter.set(text);
-                self.clamp_provider_idx();
-                Vec::new()
-            }
             Action::ClearSearch => {
                 self.setup.provider_filter.clear();
                 self.clamp_provider_idx();
-                Vec::new()
+                self.sync_selected_provider()
             }
             Action::ToggleFavorite => self.toggle_favorite(),
             Action::ConnectProvider => self.connect_provider(),
@@ -68,7 +62,10 @@ impl State {
                 // the selected model and persist per model.
                 let current = self
                     .selected_model()
-                    .and_then(|m| self.default_reasoning_for(&m.id))
+                    .and_then(|m| {
+                        self.selected_provider_id()
+                            .and_then(|pid| self.default_reasoning_for(&pid, &m.id))
+                    })
                     .unwrap_or(self.setup.reasoning);
                 let start = levels.iter().position(|l| *l == current).unwrap_or(0);
                 let idx = (start as i32 + delta).rem_euclid(len as i32) as usize;
@@ -77,8 +74,11 @@ impl State {
                     .copied()
                     .unwrap_or(lmhub_core::ReasoningLevel::Off);
                 self.setup.reasoning_idx = idx;
-                if let Some(model) = self.selected_model() {
-                    self.prefs.model_defaults.insert(model.id.clone(), level);
+                if let (Some(model), Some(pid)) = (
+                    self.selected_model().map(|m| m.id.clone()),
+                    self.selected_provider_id(),
+                ) {
+                    self.set_model_default_reasoning(&pid, &model, level);
                 }
                 vec![Effect::SavePrefs]
             }
@@ -128,10 +128,7 @@ impl State {
                 }
                 Vec::new()
             }
-            Action::SaveKey => {
-                self.save_entered_key();
-                Vec::new()
-            }
+            Action::SaveKey => self.save_entered_key(),
             Action::MouseWheelSetup { pane, dir } => {
                 self.setup.focus = pane;
                 match pane {
@@ -166,7 +163,7 @@ impl State {
 
     // ---- provider selection / search --------------------------------------
 
-    fn clamp_provider_idx(&mut self) {
+    pub(crate) fn clamp_provider_idx(&mut self) {
         let count = self
             .provider_rows()
             .into_iter()
@@ -209,8 +206,9 @@ impl State {
         if len == 0 {
             return Vec::new();
         }
+        // Wrap (like every other prompt list): the ends connect.
         self.setup.prompt_idx =
-            ((self.setup.prompt_idx as i32 + delta).max(0) as usize).min(len - 1);
+            ((self.setup.prompt_idx as i32 + delta).rem_euclid(len as i32)) as usize;
         Vec::new()
     }
 
@@ -220,7 +218,7 @@ impl State {
             return Vec::new();
         }
         self.setup.task_prompt_idx =
-            ((self.setup.task_prompt_idx as i32 + delta).max(0) as usize).min(len - 1);
+            ((self.setup.task_prompt_idx as i32 + delta).rem_euclid(len as i32)) as usize;
         Vec::new()
     }
 
@@ -250,10 +248,10 @@ impl State {
             return Vec::new();
         };
         let id = provider.id().to_string();
-        if id == "github-copilot" {
+        if provider.supports_device_flow() {
             // Device flow is long-running: defer to an effect; progress and
             // the final outcome come back as `UiMsg::Notice`.
-            self.push_notice("copilot: starting device flow…");
+            self.push_notice(format!("{id}: starting device flow…"));
             vec![Effect::RunCopilotFlow]
         } else {
             self.modal = Some(Modal::EnterKey {
@@ -264,33 +262,24 @@ impl State {
         }
     }
 
-    /// `Enter` inside the key-entry modal: validate + persist the key.
-    fn save_entered_key(&mut self) -> bool {
+    /// `Enter` inside the key-entry modal: validate and hand the key to the
+    /// event loop (the auth.json write happens off the UI thread).
+    fn save_entered_key(&mut self) -> Vec<Effect> {
         let Some(Modal::EnterKey { provider_id, input }) = &self.modal else {
-            return false;
+            return Vec::new();
         };
         let id = provider_id.clone();
         let key = input.as_str().trim().to_string();
-        if key.len() < 8 {
+        if key.len() < lmhub_core::redact::MIN_SECRET_LEN {
             self.push_notice("key too short");
-            return false;
+            return Vec::new();
         }
-        let save_result = {
-            let mut store = self.auth_store.lock().unwrap();
-            store.set_credential(&id, StoredCredential::api(key));
-            store.save()
-        };
-        match save_result {
-            Ok(()) => {
-                self.modal = None;
-                self.push_notice(format!("saved key for {id}"));
-                true
-            }
-            Err(e) => {
-                self.push_notice(format!("✖ saving auth.json failed: {e}"));
-                false
-            }
-        }
+        self.modal = None;
+        self.push_notice(format!("saving key for {id}…"));
+        vec![Effect::SaveKey {
+            provider_id: id,
+            key,
+        }]
     }
 
     // ---- bulk --------------------------------------------------------------
@@ -319,12 +308,10 @@ impl State {
             return Vec::new();
         };
         self.config.default_task_prompt = Some(p.name.clone());
-        match self.config.save(&self.config_path) {
-            Ok(()) => self.push_notice(format!("default task prompt → {}", p.name)),
-            Err(e) => self.push_notice(format!("✖ could not save config: {e}")),
-        }
+        self.push_notice(format!("default task prompt → {}", p.name));
         self.capture_prefs();
-        vec![Effect::SavePrefs]
+        // The config write happens in the event loop.
+        vec![Effect::SaveConfig, Effect::SavePrefs]
     }
 
     fn set_default_prompt(&mut self) -> Vec<Effect> {
@@ -332,12 +319,9 @@ impl State {
             return Vec::new();
         };
         self.config.default_prompt = Some(p.name.clone());
-        match self.config.save(&self.config_path) {
-            Ok(()) => self.push_notice(format!("default prompt → {}", p.name)),
-            Err(e) => self.push_notice(format!("✖ could not save config: {e}")),
-        }
+        self.push_notice(format!("default prompt → {}", p.name));
         self.capture_prefs();
-        vec![Effect::SavePrefs]
+        vec![Effect::SaveConfig, Effect::SavePrefs]
     }
 
     // ---- runs --------------------------------------------------------------
@@ -351,6 +335,17 @@ impl State {
                 return Vec::new();
             }
         };
+        // Guard against provider/model divergence: the loaded model list must
+        // belong to the provider we are about to run. `None` means the
+        // selection was never tracked (first launch/tests) — adopt it.
+        match self.setup.selected_provider_id.as_deref() {
+            Some(id) if id != provider.id() => {
+                self.push_notice("models for the selected provider are loading — try again");
+                return self.sync_selected_provider();
+            }
+            None => self.setup.selected_provider_id = Some(provider.id().to_string()),
+            Some(_) => {}
+        }
         let model = match self.selected_model() {
             Some(m) => m.clone(),
             None => {
@@ -395,6 +390,20 @@ impl State {
             self.push_notice("no task prompt available — add one to prompts/task-prompts/");
             return Vec::new();
         }
+        // Pricing is evaluated per spec: list the routes whose price is
+        // unknown so the confirmation is not mistaken for a cost estimate.
+        let unknown: Vec<String> = self
+            .bulk_specs()
+            .into_iter()
+            .filter(|s| s.pricing.is_none())
+            .map(|s| format!("{}/{}", s.provider_id, s.model_id))
+            .collect();
+        if !unknown.is_empty() {
+            self.push_notice(format!(
+                "⚠ no Models.dev price for {} (cost will be null)",
+                unknown.join(", ")
+            ));
+        }
         self.modal = Some(Modal::BulkConfirm);
         Vec::new()
     }
@@ -437,6 +446,23 @@ impl State {
         effects
     }
 
+    /// Decide whether a start gets a slot now or queues: returns the status
+    /// to apply plus the launch effect when it runs immediately.
+    ///
+    /// Shared by `launch_session`, `confirm_bulk_start` and `RerunSession` so
+    /// no entry point can bypass the concurrency cap.
+    pub(crate) fn try_launch_or_queue(&self, run_id: u64) -> (RunSessionStatus, Vec<Effect>) {
+        let cap = self.prefs.max_concurrent_runs.max(1);
+        if self.runs.running_count() < cap {
+            (
+                RunSessionStatus::Running,
+                vec![Effect::LaunchRun { run_id }],
+            )
+        } else {
+            (RunSessionStatus::Pending, Vec::new())
+        }
+    }
+
     /// Create (or queue) a run session; returns its launch effect when it
     /// starts immediately.
     fn launch_session(
@@ -448,23 +474,19 @@ impl State {
         task: String,
         pricing: Option<lmhub_core::PricingContext>,
     ) -> Vec<Effect> {
-        let cap = self.prefs.max_concurrent_runs.max(1);
-        let slot_free = self.runs.running_count() < cap;
-        let cancel = CancellationToken::new();
         let id = self.runs.next_id;
         self.runs.next_id += 1;
+        let (status, mut effects) = self.try_launch_or_queue(id);
+        let cancel = CancellationToken::new();
         let session = RunSession {
             id,
             provider_id: provider.id().to_string(),
             model_id: model.id.clone(),
             reasoning: reasoning.to_string(),
             task: task.clone(),
-            status: if slot_free {
-                RunSessionStatus::Running
-            } else {
-                RunSessionStatus::Pending
-            },
+            status,
             started: Instant::now(),
+            finished_at: None,
             cancel: Some(cancel.clone()),
             transcript: Transcript::default(),
             tokens: Default::default(),
@@ -489,10 +511,8 @@ impl State {
         self.runs.selected = self.runs.runs.len() - 1;
         self.screen = crate::action::Screen::Run;
         self.capture_prefs();
-        let mut effects = vec![Effect::SavePrefs];
-        if slot_free {
-            effects.push(Effect::LaunchRun { run_id: id });
-        } else {
+        effects.push(Effect::SavePrefs);
+        if status == RunSessionStatus::Pending {
             self.push_notice(format!(
                 "concurrency cap reached — {} queued",
                 self.runs.runs.len()

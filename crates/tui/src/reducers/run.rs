@@ -34,10 +34,7 @@ impl State {
                 let mut notice = None;
                 if let Some(run) = self.runs.selected_run_mut() {
                     match run.status {
-                        RunSessionStatus::Pending => {
-                            run.status = RunSessionStatus::Finished;
-                            run.finished_line = Some("■ cancelled (was queued)".into());
-                        }
+                        RunSessionStatus::Pending => run.cancel_while_pending(),
                         RunSessionStatus::Running => {
                             if let Some(c) = &run.cancel {
                                 c.cancel();
@@ -55,26 +52,35 @@ impl State {
             }
             Action::CancelAllRuns => self.cancel_all_runs(),
             Action::RerunSession => {
-                let mut effects = Vec::new();
-                if let Some(run) = self.runs.selected_run_mut() {
-                    if run.status == RunSessionStatus::Finished {
-                        let cancel = CancellationToken::new();
-                        run.status = RunSessionStatus::Running;
-                        run.cancel = Some(cancel.clone());
-                        run.started = Instant::now();
-                        run.transcript = Transcript::default();
-                        run.tokens = Default::default();
-                        run.tool_ok = 0;
-                        run.tool_fail = 0;
-                        run.errors = 0;
-                        run.warnings = 0;
-                        run.finished_line = None;
-                        run.final_text = None;
-                        run.run_dir = None;
-                        run.scroll = 0;
-                        run.delta_count = 0;
-                        effects.push(Effect::LaunchRun { run_id: run.id });
-                    }
+                let selected = self.runs.selected;
+                let Some(run) = self.runs.runs.get(selected) else {
+                    return Vec::new();
+                };
+                if run.status != RunSessionStatus::Finished {
+                    return Vec::new();
+                }
+                // Same slot accounting as a fresh launch: with the cap
+                // reached, the rerun queues instead of running immediately.
+                let (status, effects) = self.try_launch_or_queue(run.id);
+                let run = &mut self.runs.runs[selected];
+                let cancel = CancellationToken::new();
+                run.status = status;
+                run.cancel = Some(cancel.clone());
+                run.started = Instant::now();
+                run.finished_at = None;
+                run.transcript = Transcript::default();
+                run.tokens = Default::default();
+                run.tool_ok = 0;
+                run.tool_fail = 0;
+                run.errors = 0;
+                run.warnings = 0;
+                run.finished_line = None;
+                run.final_text = None;
+                run.run_dir = None;
+                run.scroll = 0;
+                run.delta_count = 0;
+                if status == RunSessionStatus::Pending {
+                    self.push_notice("concurrency cap reached — rerun queued");
                 }
                 effects
             }
@@ -114,10 +120,7 @@ impl State {
                     }
                     cancelled += 1;
                 }
-                RunSessionStatus::Pending => {
-                    run.status = RunSessionStatus::Finished;
-                    run.finished_line = Some("■ cancelled (was queued)".into());
-                }
+                RunSessionStatus::Pending => run.cancel_while_pending(),
                 RunSessionStatus::Finished => {}
             }
         }
@@ -125,5 +128,81 @@ impl State {
             self.push_notice(format!("cancelling {cancelled} running run(s)"));
         }
         Vec::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testutil::test_state;
+
+    fn session(state: &State, id: u64, status: RunSessionStatus) -> crate::state::RunSession {
+        crate::state::RunSession {
+            id,
+            provider_id: "openai".into(),
+            model_id: "gpt-4o".into(),
+            reasoning: "high".into(),
+            task: "t".into(),
+            status,
+            started: Instant::now(),
+            finished_at: None,
+            cancel: Some(CancellationToken::new()),
+            transcript: Transcript::default(),
+            tokens: Default::default(),
+            tool_ok: 0,
+            tool_fail: 0,
+            errors: 0,
+            warnings: 0,
+            pricing: None,
+            finished_line: None,
+            final_text: None,
+            run_dir: None,
+            scroll: 0,
+            raw_feed: false,
+            delta_count: 0,
+            provider: state.registry.get("openai").unwrap(),
+            model: lmhub_core::ModelInfo::bare("gpt-4o"),
+            reasoning_level: lmhub_core::ReasoningLevel::High,
+            system_prompt: String::new(),
+            pricing_ctx: None,
+        }
+    }
+
+    #[test]
+    fn rerun_respects_the_concurrency_cap() {
+        let (mut state, _dir) = test_state();
+        state.prefs.max_concurrent_runs = 1;
+        state.runs.runs = vec![
+            session(&state, 1, RunSessionStatus::Running),
+            session(&state, 2, RunSessionStatus::Finished),
+        ];
+        state.runs.selected = 1;
+
+        let effects = state.reduce(Action::RerunSession);
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::LaunchRun { .. })),
+            "a rerun without a free slot must queue, not launch"
+        );
+        assert_eq!(state.runs.runs[1].status, RunSessionStatus::Pending);
+        assert_eq!(state.runs.running_count(), 1);
+    }
+
+    #[test]
+    fn rerun_launches_when_a_slot_is_free() {
+        let (mut state, _dir) = test_state();
+        state.prefs.max_concurrent_runs = 2;
+        state.runs.runs = vec![
+            session(&state, 1, RunSessionStatus::Running),
+            session(&state, 2, RunSessionStatus::Finished),
+        ];
+        state.runs.selected = 1;
+
+        let effects = state.reduce(Action::RerunSession);
+        assert!(effects
+            .iter()
+            .any(|e| matches!(e, Effect::LaunchRun { run_id: 2 })));
+        assert_eq!(state.runs.runs[1].status, RunSessionStatus::Running);
     }
 }

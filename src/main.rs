@@ -81,12 +81,28 @@ async fn run(
         base: Duration::from_millis(config.retry_base_ms),
         cap: Duration::from_millis(config.retry_cap_ms),
     });
+    lmhub_providers::init_stream_idle_timeout(Duration::from_secs(
+        config.stream_idle_timeout_secs.max(1),
+    ));
 
     init_logging(&cache_dir)?;
 
     // Resolve the command-isolation backend once; warn loudly on fallback
     // (after logging is live so the warning also lands in runner.log).
     let (sandbox_runtime, sandbox_warnings) = lmhub_sandbox::detect_runtime(&config.sandbox);
+    match &sandbox_runtime {
+        lmhub_sandbox::SandboxRuntime::Bwrap(_) => {
+            eprintln!("lmhub: command isolation: bubblewrap (filesystem-jailed commands)")
+        }
+        lmhub_sandbox::SandboxRuntime::Legacy if config.legacy_commands_allowed() => eprintln!(
+            "lmhub: command isolation: legacy — run_command runs UNSANDBOXED \
+             (legacy_commands = \"allow\")"
+        ),
+        lmhub_sandbox::SandboxRuntime::Legacy => eprintln!(
+            "lmhub: command isolation: legacy — run_command disabled \
+             (install bubblewrap or set legacy_commands = \"allow\")"
+        ),
+    }
     for w in &sandbox_warnings {
         tracing::warn!("{w}");
         eprintln!("lmhub: {w}");

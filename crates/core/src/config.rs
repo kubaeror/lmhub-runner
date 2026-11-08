@@ -35,7 +35,31 @@ pub struct AppConfig {
     /// Command isolation backend: `auto` (bubblewrap when available, legacy
     /// otherwise), `bwrap` (require it), or `legacy` (no OS isolation).
     pub sandbox: String,
+    /// `run_command` under the legacy (no-bwrap) backend: `deny` (default)
+    /// refuses every command, `allow` opts into unsandboxed execution.
+    /// File tools are always jailed regardless.
+    pub legacy_commands: String,
+    /// Optional cap on history tokens sent per request. `None` derives the
+    /// budget from the model's context window (minus the output reserve).
+    pub max_history_tokens: Option<u64>,
+    /// Tool results larger than this (bytes) are trimmed, oldest first, when
+    /// a request would exceed the model's context window.
+    pub tool_result_max_bytes: u64,
+    /// Idle read timeout for streaming responses: a stream that produces no
+    /// byte for this long is stalled (this is not a total deadline, so
+    /// healthy long streams keep running).
+    pub stream_idle_timeout_secs: u64,
+    /// `find_files`/`search_files` walk depth (levels below the searched root).
+    pub walk_max_depth: u32,
+    /// `find_files`/`search_files` walk entry cap; the tool summary says when
+    /// the walk was truncated.
+    pub walk_max_entries: u64,
 }
+
+/// Lower bound applied to `max_history_tokens` by [`AppConfig::sanitize`].
+pub const MIN_HISTORY_TOKENS: u64 = 256;
+/// Lower bound applied to `tool_result_max_bytes` by [`AppConfig::sanitize`].
+pub const MIN_TOOL_RESULT_BYTES: u64 = 256;
 
 /// Default command allowlist: common developer tooling a coding agent needs
 /// in the workspace jail. Everything here runs via argv arrays (no shell);
@@ -66,6 +90,12 @@ impl Default for AppConfig {
             retry_base_ms: 500,
             retry_cap_ms: 30_000,
             sandbox: "auto".into(),
+            legacy_commands: "deny".into(),
+            max_history_tokens: None,
+            tool_result_max_bytes: 8_192,
+            stream_idle_timeout_secs: 120,
+            walk_max_depth: 12,
+            walk_max_entries: 10_000,
         }
     }
 }
@@ -135,6 +165,42 @@ impl AppConfig {
         } else {
             self.sandbox = sb;
         }
+        let lc = self.legacy_commands.trim().to_ascii_lowercase();
+        if lc != "deny" && lc != "allow" {
+            tracing::warn!(
+                config = "legacy_commands",
+                value = %self.legacy_commands,
+                "not `deny` or `allow`; refusing unsandboxed commands (deny)"
+            );
+            self.legacy_commands = "deny".into();
+        } else {
+            self.legacy_commands = lc;
+        }
+        // Context budget: a zero/tiny cap would make every request fail.
+        match self.max_history_tokens {
+            Some(v) if v < MIN_HISTORY_TOKENS => {
+                tracing::warn!(
+                    config = "max_history_tokens",
+                    from = v,
+                    to = MIN_HISTORY_TOKENS,
+                    "clamped to minimum"
+                );
+                self.max_history_tokens = Some(MIN_HISTORY_TOKENS);
+            }
+            _ => {}
+        }
+        fix(
+            &mut self.tool_result_max_bytes,
+            MIN_TOOL_RESULT_BYTES,
+            "tool_result_max_bytes",
+        );
+        fix(
+            &mut self.stream_idle_timeout_secs,
+            1,
+            "stream_idle_timeout_secs",
+        );
+        fix(&mut self.walk_max_depth, 1, "walk_max_depth");
+        fix(&mut self.walk_max_entries, 1, "walk_max_entries");
     }
 
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
@@ -149,6 +215,11 @@ impl AppConfig {
 
     pub fn run_timeout(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.run_timeout_secs)
+    }
+
+    /// True when `run_command` may run without OS isolation (legacy backend).
+    pub fn legacy_commands_allowed(&self) -> bool {
+        self.legacy_commands == "allow"
     }
 
     pub fn command_timeout(&self) -> std::time::Duration {
@@ -169,6 +240,8 @@ mod tests {
             max_retries: 0,
             retry_base_ms: 0,
             retry_cap_ms: 0,
+            max_history_tokens: Some(0),
+            tool_result_max_bytes: 0,
             ..AppConfig::default()
         };
         cfg.sanitize();
@@ -178,6 +251,8 @@ mod tests {
         assert!(cfg.max_retries >= 1);
         assert!(cfg.retry_base_ms >= 1);
         assert!(cfg.retry_cap_ms >= cfg.retry_base_ms);
+        assert_eq!(cfg.max_history_tokens, Some(MIN_HISTORY_TOKENS));
+        assert_eq!(cfg.tool_result_max_bytes, MIN_TOOL_RESULT_BYTES);
     }
 
     #[test]
@@ -194,5 +269,26 @@ mod tests {
                 .map(|s| s.to_string())
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn legacy_commands_defaults_to_deny_and_rejects_junk() {
+        assert_eq!(AppConfig::default().legacy_commands, "deny");
+        assert!(!AppConfig::default().legacy_commands_allowed());
+
+        let mut cfg = AppConfig {
+            legacy_commands: "Allow".into(), // case-normalized
+            ..AppConfig::default()
+        };
+        cfg.sanitize();
+        assert_eq!(cfg.legacy_commands, "allow");
+        assert!(cfg.legacy_commands_allowed());
+
+        let mut cfg = AppConfig {
+            legacy_commands: "yes".into(),
+            ..AppConfig::default()
+        };
+        cfg.sanitize();
+        assert_eq!(cfg.legacy_commands, "deny", "junk must fail closed");
     }
 }

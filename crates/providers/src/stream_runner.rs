@@ -14,17 +14,7 @@ use lmhub_core::{
 };
 use std::time::Instant;
 
-fn truncate_body(body: &str) -> String {
-    lmhub_core::redact::scrub(&body.chars().take(600).collect::<String>())
-}
-
-async fn ensure_success(resp: reqwest::Response) -> Result<reqwest::Response> {
-    let status = resp.status();
-    if status.is_success() {
-        return Ok(resp);
-    }
-    Err(status_error(resp).await)
-}
+use crate::wire_common::truncate_body;
 
 /// Turn a non-success response into the canonical provider error, consuming
 /// the body (truncated and scrubbed).
@@ -34,7 +24,7 @@ async fn status_error(resp: reqwest::Response) -> CoreError {
     CoreError::Provider(format!(
         "HTTP {}: {}",
         status.as_u16(),
-        truncate_body(&text)
+        truncate_body(&text, 600)
     ))
 }
 
@@ -63,6 +53,9 @@ pub(crate) async fn openai_sse(
         },
     );
     let mut degraded = false;
+    // Degradations discovered before the stream starts; attached to the final
+    // response so the run records them as warnings.
+    let mut request_warnings: Vec<String> = Vec::new();
 
     loop {
         let body_str = serde_json::to_string(&payload).expect("payload serializes");
@@ -70,6 +63,7 @@ pub(crate) async fn openai_sse(
         if resp.status().is_success() {
             let events = Box::pin(sse::sse_events(resp.bytes_stream()));
             let started = Instant::now();
+            let stream_warnings = request_warnings.clone();
             return Ok(Box::pin(futures::stream::unfold(
                 (
                     events,
@@ -77,51 +71,71 @@ pub(crate) async fn openai_sse(
                     false,
                     started,
                 ),
-                |(mut events, mut acc, mut done, started)| async move {
-                    if done {
-                        return None;
-                    }
-                    loop {
-                        match futures::StreamExt::next(&mut events).await {
-                            Some(Ok(SseEvent { data, .. })) => {
-                                if data.trim().is_empty() {
-                                    // Comment/keep-alive-only block — not an
-                                    // event (would otherwise fail JSON parsing
-                                    // and abort a healthy stream).
-                                    continue;
+                move |(mut events, mut acc, mut done, started)| {
+                    let stream_warnings = stream_warnings.clone();
+                    async move {
+                        if done {
+                            return None;
+                        }
+                        loop {
+                            match futures::StreamExt::next(&mut events).await {
+                                Some(Ok(SseEvent { data, .. })) => {
+                                    if data.trim().is_empty() {
+                                        // Comment/keep-alive-only block — not an
+                                        // event (would otherwise fail JSON parsing
+                                        // and abort a healthy stream).
+                                        continue;
+                                    }
+                                    if data.trim() == "[DONE]" {
+                                        done = true;
+                                        break;
+                                    }
+                                    let chunk = match sse::parse_json(&data) {
+                                        Ok(v) => v,
+                                        Err(e) => {
+                                            done = true;
+                                            return Some((Err(e), (events, acc, done, started)));
+                                        }
+                                    };
+                                    if let Some(msg) = sse::framed_error(&chunk) {
+                                        done = true;
+                                        return Some((
+                                            Err(CoreError::Provider(msg)),
+                                            (events, acc, done, started),
+                                        ));
+                                    }
+                                    if let Some(delta) = acc.feed(&chunk) {
+                                        return Some((
+                                            Ok(ChatStreamItem::Delta(delta)),
+                                            (events, acc, done, started),
+                                        ));
+                                    }
                                 }
-                                if data.trim() == "[DONE]" {
+                                Some(Err(e)) => {
+                                    // Lenient close: content already streamed to the user.
+                                    done = true;
+                                    let item = graceful_finish_with_warnings(
+                                        &mut acc,
+                                        started,
+                                        Err(e),
+                                        stream_warnings,
+                                    );
+                                    return Some((item, (events, acc, done, started)));
+                                }
+                                None => {
                                     done = true;
                                     break;
                                 }
-                                let chunk = match sse::parse_json(&data) {
-                                    Ok(v) => v,
-                                    Err(e) => {
-                                        done = true;
-                                        return Some((Err(e), (events, acc, done, started)));
-                                    }
-                                };
-                                if let Some(delta) = acc.feed(&chunk) {
-                                    return Some((
-                                        Ok(ChatStreamItem::Delta(delta)),
-                                        (events, acc, done, started),
-                                    ));
-                                }
-                            }
-                            Some(Err(e)) => {
-                                // Lenient close: content already streamed to the user.
-                                done = true;
-                                let item = graceful_finish(&mut acc, started, Err(e));
-                                return Some((item, (events, acc, done, started)));
-                            }
-                            None => {
-                                done = true;
-                                break;
                             }
                         }
+                        let item = graceful_finish_with_warnings(
+                            &mut acc,
+                            started,
+                            Ok(()),
+                            stream_warnings,
+                        );
+                        Some((item, (events, acc, done, started)))
                     }
-                    let item = graceful_finish(&mut acc, started, Ok(()));
-                    Some((item, (events, acc, done, started)))
                 },
             )));
         }
@@ -161,11 +175,25 @@ pub(crate) async fn openai_sse(
             );
         } else if use_max_tokens {
             wire_openai::use_max_tokens_field(&mut payload);
+        } else if crate::wire_common::is_tools_rejection(&text) && !request.tools.is_empty() {
+            // Model/route has no tool support: one plain-text turn instead of
+            // failing the run. The agent loop ends after it (no tool calls).
+            let mut stripped = request.clone();
+            stripped.tools.clear();
+            payload = wire_openai::build_stream_payload(
+                &stripped,
+                OpenAiWireOpts {
+                    include_reasoning_effort: request.reasoning != ReasoningLevel::Off,
+                },
+            );
+            request_warnings.push(
+                "provider rejected `tools`; retried without tools (agent loop disabled)".into(),
+            );
         } else {
             return Err(CoreError::Provider(format!(
                 "HTTP {}: {}",
                 status.as_u16(),
-                truncate_body(&text)
+                truncate_body(&text, 600)
             )));
         }
         degraded = true;
@@ -191,6 +219,7 @@ pub(crate) async fn anthropic_sse(
         payload["anthropic_version"] = serde_json::json!("vertex-2023-10-16");
     }
     let mut degraded = false;
+    let mut request_warnings: Vec<String> = Vec::new();
 
     loop {
         let body_str = serde_json::to_string(&payload).expect("payload serializes");
@@ -198,46 +227,74 @@ pub(crate) async fn anthropic_sse(
         if resp.status().is_success() {
             let events = Box::pin(sse::sse_events(resp.bytes_stream()));
             let started = Instant::now();
+            let stream_warnings = request_warnings.clone();
             return Ok(Box::pin(futures::stream::unfold(
                 (events, AnthropicStreamAccumulator::new(), false, started),
-                |(mut events, mut acc, mut done, started)| async move {
-                    if done {
-                        return None;
-                    }
-                    loop {
-                        match futures::StreamExt::next(&mut events).await {
-                            Some(Ok(SseEvent { event, data })) => {
-                                let data_value = match sse::parse_json(&data) {
-                                    Ok(v) => v,
-                                    Err(e) => {
+                move |(mut events, mut acc, mut done, started)| {
+                    let stream_warnings = stream_warnings.clone();
+                    async move {
+                        if done {
+                            return None;
+                        }
+                        loop {
+                            match futures::StreamExt::next(&mut events).await {
+                                Some(Ok(SseEvent { event, data })) => {
+                                    if event.as_deref() == Some("error") {
                                         done = true;
-                                        return Some((Err(e), (events, acc, done, started)));
+                                        return Some((
+                                            Err(CoreError::Provider(sse::error_from_text(&data))),
+                                            (events, acc, done, started),
+                                        ));
                                     }
-                                };
-                                if let Some(delta) = acc.feed(event.as_deref(), &data_value) {
-                                    return Some((
-                                        Ok(ChatStreamItem::Delta(delta)),
-                                        (events, acc, done, started),
-                                    ));
+                                    let data_value = match sse::parse_json(&data) {
+                                        Ok(v) => v,
+                                        Err(e) => {
+                                            done = true;
+                                            return Some((Err(e), (events, acc, done, started)));
+                                        }
+                                    };
+                                    if let Some(msg) = sse::framed_error(&data_value) {
+                                        done = true;
+                                        return Some((
+                                            Err(CoreError::Provider(msg)),
+                                            (events, acc, done, started),
+                                        ));
+                                    }
+                                    if let Some(delta) = acc.feed(event.as_deref(), &data_value) {
+                                        return Some((
+                                            Ok(ChatStreamItem::Delta(delta)),
+                                            (events, acc, done, started),
+                                        ));
+                                    }
+                                    if event.as_deref() == Some("message_stop") {
+                                        done = true;
+                                        break;
+                                    }
                                 }
-                                if event.as_deref() == Some("message_stop") {
+                                Some(Err(e)) => {
+                                    done = true;
+                                    let item = graceful_finish_with_warnings(
+                                        &mut acc,
+                                        started,
+                                        Err(e),
+                                        stream_warnings,
+                                    );
+                                    return Some((item, (events, acc, done, started)));
+                                }
+                                None => {
                                     done = true;
                                     break;
                                 }
                             }
-                            Some(Err(e)) => {
-                                done = true;
-                                let item = graceful_finish(&mut acc, started, Err(e));
-                                return Some((item, (events, acc, done, started)));
-                            }
-                            None => {
-                                done = true;
-                                break;
-                            }
                         }
+                        let item = graceful_finish_with_warnings(
+                            &mut acc,
+                            started,
+                            Ok(()),
+                            stream_warnings,
+                        );
+                        Some((item, (events, acc, done, started)))
                     }
-                    let item = graceful_finish(&mut acc, started, Ok(()));
-                    Some((item, (events, acc, done, started)))
                 },
             )));
         }
@@ -248,11 +305,30 @@ pub(crate) async fn anthropic_sse(
         let text = resp.text().await.unwrap_or_default();
         let thinking_rejected =
             wire_openai::is_reasoning_rejection(&text) && request.reasoning != ReasoningLevel::Off;
+        if crate::wire_common::is_tools_rejection(&text) && !request.tools.is_empty() {
+            // No tool support on this route: try one plain-text turn.
+            let mut stripped = request.clone();
+            stripped.tools.clear();
+            payload = wire_anthropic::build_chat_payload(
+                &stripped,
+                wire_anthropic::AnthropicWireOpts {
+                    supports_thinking: request.reasoning != ReasoningLevel::Off,
+                },
+            );
+            if url.contains(":rawStreamPredict") {
+                payload["anthropic_version"] = serde_json::json!("vertex-2023-10-16");
+            }
+            request_warnings.push(
+                "provider rejected `tools`; retried without tools (agent loop disabled)".into(),
+            );
+            degraded = true;
+            continue;
+        }
         if !thinking_rejected {
             return Err(CoreError::Provider(format!(
                 "HTTP {}: {}",
                 status.as_u16(),
-                truncate_body(&text)
+                truncate_body(&text, 600)
             )));
         }
         // Retry with the level the provider suggests when it names one
@@ -283,13 +359,36 @@ pub(crate) async fn gemini_sse(
     headers: Vec<(String, String)>,
     request: &ChatRequest,
 ) -> Result<ChatStream> {
-    let payload = gemini::build_payload(request);
-    let body_str = serde_json::to_string(&payload).expect("payload serializes");
-    let resp = http::post_stream(http_client, &url, headers, body_str).await?;
-    let resp = ensure_success(resp).await?;
+    let mut payload = gemini::build_payload(request);
+    let mut degraded = false;
+    let mut request_warnings: Vec<String> = Vec::new();
+    let resp = loop {
+        let body_str = serde_json::to_string(&payload).expect("payload serializes");
+        let resp = http::post_stream(http_client, &url, headers.clone(), body_str).await?;
+        if resp.status().is_success() {
+            break resp;
+        }
+        if degraded {
+            return Err(status_error(resp).await);
+        }
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !gemini::is_thinking_rejection(&text) {
+            return Err(CoreError::Provider(format!(
+                "HTTP {}: {}",
+                status.as_u16(),
+                truncate_body(&text, 600)
+            )));
+        }
+        // Degrade once: retry without thinkingConfig.
+        payload = gemini::build_payload_without_thinking(request);
+        request_warnings.push("provider rejected `thinkingConfig`; retried without it".into());
+        degraded = true;
+    };
 
     let events = Box::pin(sse::sse_events(resp.bytes_stream()));
     let started = Instant::now();
+    let stream_warnings = request_warnings.clone();
     Ok(Box::pin(futures::stream::unfold(
         (
             events,
@@ -297,44 +396,60 @@ pub(crate) async fn gemini_sse(
             false,
             started,
         ),
-        |(mut events, mut acc, mut done, started)| async move {
-            if done {
-                return None;
-            }
-            loop {
-                match futures::StreamExt::next(&mut events).await {
-                    Some(Ok(SseEvent { data, .. })) => {
-                        if data.trim().is_empty() {
-                            // Comment/keep-alive-only block — not an event.
-                            continue;
-                        }
-                        let chunk = match sse::parse_json(&data) {
-                            Ok(v) => v,
-                            Err(e) => {
-                                done = true;
-                                return Some((Err(e), (events, acc, done, started)));
+        move |(mut events, mut acc, mut done, started)| {
+            let stream_warnings = stream_warnings.clone();
+            async move {
+                if done {
+                    return None;
+                }
+                loop {
+                    match futures::StreamExt::next(&mut events).await {
+                        Some(Ok(SseEvent { data, .. })) => {
+                            if data.trim().is_empty() {
+                                // Comment/keep-alive-only block — not an event.
+                                continue;
                             }
-                        };
-                        if let Some(delta) = acc.feed(&chunk) {
-                            return Some((
-                                Ok(ChatStreamItem::Delta(delta)),
-                                (events, acc, done, started),
-                            ));
+                            let chunk = match sse::parse_json(&data) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    done = true;
+                                    return Some((Err(e), (events, acc, done, started)));
+                                }
+                            };
+                            if let Some(msg) = sse::framed_error(&chunk) {
+                                done = true;
+                                return Some((
+                                    Err(CoreError::Provider(msg)),
+                                    (events, acc, done, started),
+                                ));
+                            }
+                            if let Some(delta) = acc.feed(&chunk) {
+                                return Some((
+                                    Ok(ChatStreamItem::Delta(delta)),
+                                    (events, acc, done, started),
+                                ));
+                            }
                         }
-                    }
-                    Some(Err(e)) => {
-                        done = true;
-                        let item = graceful_finish(&mut acc, started, Err(e));
-                        return Some((item, (events, acc, done, started)));
-                    }
-                    None => {
-                        done = true;
-                        break;
+                        Some(Err(e)) => {
+                            done = true;
+                            let item = graceful_finish_with_warnings(
+                                &mut acc,
+                                started,
+                                Err(e),
+                                stream_warnings,
+                            );
+                            return Some((item, (events, acc, done, started)));
+                        }
+                        None => {
+                            done = true;
+                            break;
+                        }
                     }
                 }
+                let item =
+                    graceful_finish_with_warnings(&mut acc, started, Ok(()), stream_warnings);
+                Some((item, (events, acc, done, started)))
             }
-            let item = graceful_finish(&mut acc, started, Ok(()));
-            Some((item, (events, acc, done, started)))
         },
     )))
 }
@@ -342,16 +457,43 @@ pub(crate) async fn gemini_sse(
 /// On clean EOF/`[DONE]`: always produce the assembled response.
 /// On transport error mid-stream: still complete gracefully when the user
 /// already received meaningful content; otherwise surface the failure.
+///
+/// Idle read timeouts are the exception: a stalled stream means the answer is
+/// incomplete, so the run must see [`CoreError::Timeout`] instead of a
+/// fabricated `Completed`.
 fn graceful_finish<A>(acc: &mut A, started: Instant, err: Result<()>) -> Result<ChatStreamItem>
 where
     A: GracefulFinish,
 {
+    if matches!(err, Err(CoreError::Timeout)) {
+        return Err(CoreError::Timeout);
+    }
     let duration_ms = started.elapsed().as_millis() as u64;
     let result = acc.finish_graceful(duration_ms);
     match (result, err) {
         (Ok(resp), _) => Ok(ChatStreamItem::Completed(resp)),
         (Err(parse_err), Err(transport)) => Err(transport_context(transport, parse_err)),
         (Err(parse_err), Ok(())) => Err(parse_err),
+    }
+}
+
+/// [`graceful_finish`] plus request-level degradation warnings (e.g. "retried
+/// without tools") attached to the assembled response.
+fn graceful_finish_with_warnings<A>(
+    acc: &mut A,
+    started: Instant,
+    err: Result<()>,
+    warnings: Vec<String>,
+) -> Result<ChatStreamItem>
+where
+    A: GracefulFinish,
+{
+    match graceful_finish(acc, started, err)? {
+        ChatStreamItem::Completed(mut resp) => {
+            resp.warnings.extend(warnings);
+            Ok(ChatStreamItem::Completed(resp))
+        }
+        other => Ok(other),
     }
 }
 
@@ -480,6 +622,184 @@ mod tests {
         assert!(
             req2.contains("\"reasoning_effort\":\"low\""),
             "retry uses the suggested level: {req2}"
+        );
+    }
+
+    /// A stream that stalls longer than the idle window must surface
+    /// `CoreError::Timeout`, never a fabricated `Completed` response.
+    #[tokio::test]
+    async fn idle_timeout_stall_is_timeout_not_completed() {
+        crate::http::init_stream_idle_timeout(std::time::Duration::from_secs(1));
+
+        let part1 =
+            "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"Hel\"}}]}\n\n";
+        let part2 = "data: [DONE]\n\n";
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let _ = read_http_request(&mut sock).await;
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                part1.len() + part2.len()
+            );
+            sock.write_all(head.as_bytes()).await.unwrap();
+            sock.write_all(part1.as_bytes()).await.unwrap();
+            sock.flush().await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            let _ = sock.write_all(part2.as_bytes()).await; // client may be gone
+        });
+
+        let client = reqwest::Client::new();
+        let req = sample_request(ReasoningLevel::Off);
+        let stream = openai_sse(
+            &client,
+            format!("http://{addr}/v1/chat/completions"),
+            Vec::new(),
+            &req,
+        )
+        .await
+        .unwrap();
+        let items: Vec<Result<ChatStreamItem>> = futures::StreamExt::collect(stream).await;
+
+        assert!(
+            items.iter().any(|i| matches!(i, Err(CoreError::Timeout))),
+            "stalled stream must end in a timeout: {items:?}"
+        );
+        assert!(
+            !items
+                .iter()
+                .any(|i| matches!(i, Ok(ChatStreamItem::Completed(_)))),
+            "a stalled stream must not report Completed: {items:?}"
+        );
+        // Content that actually arrived is still delivered to the UI.
+        assert!(items.iter().any(|i| matches!(
+            i,
+            Ok(ChatStreamItem::Delta(ChatDelta::Text(t))) if t == "Hel"
+        )));
+    }
+
+    /// Model without tool support: the runner retries the stream once
+    /// without `tools` and records a warning on the assembled response.
+    #[tokio::test]
+    async fn openai_tools_rejection_retries_without_tools() {
+        let reject = serde_json::json!({
+            "error": {"type": "invalid_request_error",
+                      "message": "Invalid parameter: 'tools' is not supported by this model"}
+        })
+        .to_string();
+        let sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"plain answer\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        )
+        .to_string();
+        let (base, rx) = crate::wire_test_util::two_shot_server(400, reject, sse).await;
+
+        let client = reqwest::Client::new();
+        let req = sample_request(ReasoningLevel::Off);
+        let stream = openai_sse(
+            &client,
+            format!("{base}/chat/completions"),
+            Vec::new(),
+            &req,
+        )
+        .await
+        .expect("tool rejection must degrade, not fail");
+        let items: Vec<Result<ChatStreamItem>> = futures::StreamExt::collect(stream).await;
+        let completed = items
+            .iter()
+            .find_map(|i| match i {
+                Ok(ChatStreamItem::Completed(resp)) => Some(resp),
+                _ => None,
+            })
+            .expect("completed response");
+        assert_eq!(completed.text, "plain answer");
+        assert!(
+            completed.warnings.iter().any(|w| w.contains("tools")),
+            "warning must be recorded: {:?}",
+            completed.warnings
+        );
+
+        let (first, second) = rx.await.unwrap();
+        assert!(first.contains("\"tools\""), "first attempt keeps tools");
+        assert!(
+            !second.contains("\"tools\""),
+            "retry must strip tools: {second}"
+        );
+    }
+
+    /// Anthropic `event: error` frames abort the stream with the provider's
+    /// message instead of being silently ignored.
+    #[tokio::test]
+    async fn anthropic_error_event_surfaces_provider_error() {
+        let sse = concat!(
+            "event: message_start\n",
+            "data: {\"message\":{\"usage\":{\"input_tokens\":1}}}\n\n",
+            "event: error\n",
+            "data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n",
+        )
+        .to_string();
+        let (base, _rx) =
+            crate::wire_test_util::one_shot_server(200, "text/event-stream", sse).await;
+        let stream = anthropic_sse(
+            &reqwest::Client::new(),
+            format!("{base}/messages"),
+            Vec::new(),
+            &sample_request(ReasoningLevel::Off),
+        )
+        .await
+        .unwrap();
+        let items: Vec<Result<ChatStreamItem>> = futures::StreamExt::collect(stream).await;
+        assert!(
+            items
+                .iter()
+                .any(|i| matches!(i, Err(CoreError::Provider(m)) if m.contains("Overloaded"))),
+            "{items:?}"
+        );
+    }
+
+    /// Framed `data: {"error": …}` payloads are errors in all three wires.
+    #[tokio::test]
+    async fn gemini_framed_error_surfaces_provider_error() {
+        let sse = "data: {\"error\":{\"code\":429,\"message\":\"Quota exceeded\"}}\n\n".to_string();
+        let (base, _rx) =
+            crate::wire_test_util::one_shot_server(200, "text/event-stream", sse).await;
+        let client = reqwest::Client::new();
+        let req = sample_request(ReasoningLevel::Off);
+        let stream = gemini_sse(
+            &client,
+            format!("{base}/models/test:streamGenerateContent?alt=sse"),
+            Vec::new(),
+            &req,
+        )
+        .await
+        .unwrap();
+        let items: Vec<Result<ChatStreamItem>> = futures::StreamExt::collect(stream).await;
+        assert!(
+            items
+                .iter()
+                .any(|i| matches!(i, Err(CoreError::Provider(m)) if m.contains("Quota exceeded"))),
+            "{items:?}"
+        );
+
+        // Same for the OpenAI wire.
+        let sse = "data: {\"error\":{\"message\":\"rate limited\"}}\n\n".to_string();
+        let (base, _rx) =
+            crate::wire_test_util::one_shot_server(200, "text/event-stream", sse).await;
+        let stream = openai_sse(
+            &client,
+            format!("{base}/chat/completions"),
+            Vec::new(),
+            &req,
+        )
+        .await
+        .unwrap();
+        let items: Vec<Result<ChatStreamItem>> = futures::StreamExt::collect(stream).await;
+        assert!(
+            items
+                .iter()
+                .any(|i| matches!(i, Err(CoreError::Provider(m)) if m.contains("rate limited"))),
+            "{items:?}"
         );
     }
 }

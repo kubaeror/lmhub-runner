@@ -1,12 +1,13 @@
 //! Native Anthropic adapter (api.anthropic.com, Messages API).
 
+use crate::credentials;
 use crate::http;
 use crate::wire_anthropic::{self, AnthropicWireOpts};
 use async_trait::async_trait;
 use lmhub_core::{
-    ChatRequest, ChatResponse, CoreError, Provider, ProviderCaps, ReasoningLevel, Result,
+    AuthStore, ChatRequest, ChatResponse, CoreError, Provider, ProviderCaps, ReasoningLevel, Result,
 };
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com/v1";
@@ -20,10 +21,12 @@ pub struct NativeAnthropicProvider {
     pub name: String,
     pub api_key_env: String,
     pub models_dev_id: String,
+    /// Shared credential store: auth.json wins over the env var.
+    pub auth_store: Arc<Mutex<AuthStore>>,
 }
 
 impl NativeAnthropicProvider {
-    pub fn standard() -> Arc<dyn Provider> {
+    pub fn standard(auth_store: Arc<Mutex<AuthStore>>) -> Arc<dyn Provider> {
         Arc::new(Self {
             http: reqwest::Client::new(),
             base_url: DEFAULT_BASE_URL.to_string(),
@@ -31,6 +34,7 @@ impl NativeAnthropicProvider {
             name: "Anthropic".into(),
             api_key_env: "ANTHROPIC_API_KEY".into(),
             models_dev_id: "anthropic".into(),
+            auth_store,
         })
     }
 
@@ -42,9 +46,17 @@ impl NativeAnthropicProvider {
         format!("{}/models", self.base_url.trim_end_matches('/'))
     }
 
+    /// auth.json → env → `missing_api_key`, resolved per request.
+    fn key(&self) -> Result<String> {
+        credentials::require_shared(
+            &self.auth_store,
+            &self.id,
+            std::slice::from_ref(&self.api_key_env),
+        )
+    }
+
     async fn post_messages(&self, payload: &serde_json::Value) -> Result<ChatResponse> {
-        let key = std::env::var(&self.api_key_env)
-            .map_err(|_| CoreError::MissingApiKey(self.api_key_env.clone()))?;
+        let key = self.key()?;
         let headers = vec![
             ("x-api-key".to_string(), key),
             (
@@ -94,8 +106,7 @@ impl Provider for NativeAnthropicProvider {
     }
 
     async fn list_models_api(&self) -> Result<Option<Vec<String>>> {
-        let key = std::env::var(&self.api_key_env)
-            .map_err(|_| CoreError::MissingApiKey(self.api_key_env.clone()))?;
+        let key = self.key()?;
         let headers = vec![
             ("x-api-key".to_string(), key),
             (
@@ -129,12 +140,11 @@ impl Provider for NativeAnthropicProvider {
                         supports_thinking: false,
                     },
                 );
-                self.post_messages(&plain).await.map(|mut r| {
-                    r.warnings.extend(warnings.iter().cloned());
-                    r
-                })
+                self.post_messages(&plain)
+                    .await
+                    .map(|r| crate::wire_common::merge_warnings(r, warnings))
             }
-            Err(CoreError::Provider(msg)) if is_tools_rejection(&msg) => {
+            Err(CoreError::Provider(msg)) if crate::wire_common::is_tools_rejection(&msg) => {
                 warnings.push("provider rejected `tools`; retried without tools".into());
                 let mut stripped = request.clone();
                 stripped.tools.clear();
@@ -145,18 +155,16 @@ impl Provider for NativeAnthropicProvider {
                         supports_thinking: false,
                     },
                 );
-                self.post_messages(&plain).await.map(|mut r| {
-                    r.warnings.extend(warnings.iter().cloned());
-                    r
-                })
+                self.post_messages(&plain)
+                    .await
+                    .map(|r| crate::wire_common::merge_warnings(r, warnings))
             }
             Err(e) => Err(e),
         }
     }
 
     async fn chat_stream(&self, request: &ChatRequest) -> Result<lmhub_core::ChatStream> {
-        let key = std::env::var(&self.api_key_env)
-            .map_err(|_| CoreError::MissingApiKey(self.api_key_env.clone()))?;
+        let key = self.key()?;
         let url = format!("{}/messages", self.base_url.trim_end_matches('/'));
         let headers = vec![
             ("x-api-key".to_string(), key),
@@ -174,7 +182,39 @@ fn is_thinking_rejection(msg: &str) -> bool {
     m.contains("thinking") && (m.contains("unsupported") || m.contains("not supported"))
 }
 
-fn is_tools_rejection(msg: &str) -> bool {
-    let m = msg.to_ascii_lowercase();
-    m.contains("'tools'") || (m.contains("tools") && m.contains("unsupported"))
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wire_test_util::{one_shot_server, sample_request};
+    use lmhub_core::{ReasoningLevel, StoredCredential};
+
+    const RESPONSE: &str = r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"hi"}],"model":"test","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#;
+
+    #[tokio::test]
+    async fn stored_credential_is_used_without_env() {
+        let env_key = "LMHUB_TEST_ANTHROPIC_STORED_ONLY";
+        std::env::remove_var(env_key);
+        let mut store = AuthStore::load(std::env::temp_dir().join("lmhub-test-auth-unused.json"));
+        store.set_credential(
+            "anthropic",
+            StoredCredential::api("sk-ant-stored-1234567890"),
+        );
+        let (base, rx) = one_shot_server(200, "application/json", RESPONSE.into()).await;
+        let p = NativeAnthropicProvider {
+            http: reqwest::Client::new(),
+            base_url: base,
+            id: "anthropic".into(),
+            name: "Anthropic".into(),
+            api_key_env: env_key.into(),
+            models_dev_id: "anthropic".into(),
+            auth_store: Arc::new(Mutex::new(store)),
+        };
+        let resp = p.chat(&sample_request(ReasoningLevel::Off)).await.unwrap();
+        assert_eq!(resp.text, "hi");
+        let raw = rx.await.unwrap().to_ascii_lowercase();
+        assert!(
+            raw.contains("x-api-key: sk-ant-stored-1234567890"),
+            "auth.json key must be sent: {raw}"
+        );
+    }
 }
